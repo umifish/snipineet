@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交互式 DevTools 技术方案</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #1e293b;
+        }
+        .nav-link {
+            transition: all 0.2s ease-in-out;
+            border-bottom: 2px solid transparent;
+        }
+        .nav-link.active, .nav-link:hover {
+            border-bottom-color: #3b82f6;
+            color: #1d4ed8;
+        }
+        .content-section {
+            display: none;
+        }
+        .content-section.active {
+            display: block;
+        }
+        .diagram-box {
+            border: 1px solid #e2e8f0;
+            background-color: white;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            text-align: center;
+        }
+        .arrow {
+            position: relative;
+            color: #64748b;
+            font-size: 1.5rem;
+            line-height: 2rem;
+        }
+        .tab-btn {
+            transition: all 0.2s ease-in-out;
+        }
+        .tab-btn.active {
+            background-color: #3b82f6;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        pre {
+            background-color: #1e293b;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            font-size: 0.875rem;
+        }
+        code {
+            font-family: 'Courier New', Courier, monospace;
+        }
+    </style>
+    <!-- Chosen Palette: "Modern Slate" -->
+    <!-- Application Structure Plan: A tabbed single-page application design. The top navigation allows users to switch between high-level concepts: Architecture, Protocol, Tech Stack, Features, and Roadmap. This structure deconstructs the dense technical document into logical, self-contained sections. The goal is to facilitate non-linear exploration, allowing a developer to jump directly to the section most relevant to them, which is more effective than reading a linear document. -->
+    <!-- Visualization & Content Choices: [Architecture -> Goal: Organize -> Viz: HTML/CSS diagram to visually represent the system's components and data flow, enhancing comprehension over plain text.][CDP Protocol -> Goal: Inform -> Viz: Interactive dropdown to demonstrate request/response cycles, making the abstract protocol tangible.][Features -> Goal: Organize/Inform -> Viz: Tabbed content area to detail the implementation of each DevTools panel, breaking down complex information into manageable parts.][Roadmap -> Goal: Change -> Viz: A styled list representing a timeline, clearly outlining the project phases.] CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+</head>
+<body class="antialiased">
+
+    <div class="container mx-auto px-4 py-8">
+        <header class="text-center mb-10">
+            <h1 class="text-4xl font-bold text-slate-800">类 Chrome DevTools 交互式技术方案</h1>
+            <p class="text-lg text-slate-500 mt-2">一个将静态技术文档转化为动态可探索体验的Web应用</p>
+        </header>
+
+        <nav class="bg-white rounded-lg shadow-sm mb-8 sticky top-4 z-10">
+            <ul class="flex items-center justify-center p-2 space-x-2 md:space-x-8">
+                <li><a href="#architecture" class="nav-link active font-medium p-3" data-target="architecture">系统架构</a></li>
+                <li><a href="#protocol" class="nav-link font-medium p-3" data-target="protocol">核心协议</a></li>
+                <li><a href="#stack" class="nav-link font-medium p-3" data-target="stack">技术栈</a></li>
+                <li><a href="#features" class="nav-link font-medium p-3" data-target="features">功能实现</a></li>
+                <li><a href="#roadmap" class="nav-link font-medium p-3" data-target="roadmap">实施路线</a></li>
+            </ul>
+        </nav>
+
+        <main id="main-content">
+            <!-- Section 1: Architecture -->
+            <section id="architecture" class="content-section active">
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-2">系统架构</h2>
+                    <p class="text-slate-600 mb-8">本调试工具采用三层分离架构，确保了各部分职责清晰、易于维护和扩展。核心数据流通过 WebSocket 在前端、后端代理和调试目标之间传递，实现了高效的实时双向通信。</p>
+                    <div class="grid md:grid-cols-5 items-center gap-4 text-center">
+                        <div class="diagram-box">
+                            <h3 class="font-semibold text-lg">前端 UI</h3>
+                            <p class="text-sm text-slate-500">(React/Vue)</p>
+                        </div>
+                        <div class="arrow flex justify-center items-center">&lt;---&gt;</div>
+                        <div class="diagram-box">
+                            <h3 class="font-semibold text-lg">后端代理</h3>
+                            <p class="text-sm text-slate-500">(Node.js)</p>
+                        </div>
+                        <div class="arrow flex justify-center items-center">&lt;---&gt;</div>
+                        <div class="diagram-box">
+                            <h3 class="font-semibold text-lg">调试目标</h3>
+                            <p class="text-sm text-slate-500">(浏览器页面)</p>
+                        </div>
+                    </div>
+                    <div class="mt-8">
+                        <h3 class="text-xl font-semibold mb-4">工作流程</h3>
+                        <ol class="list-decimal list-inside space-y-3 text-slate-700">
+                            <li><span class="font-semibold">启动目标:</span> 浏览器通过 `--remote-debugging-port` 参数开启调试服务。</li>
+                            <li><span class="font-semibold">后端连接:</span> Node.js 代理服务通过 WebSocket 连接到浏览器暴露的调试地址。</li>
+                            <li><span class="font-semibold">前端连接:</span> 用户打开的前端 UI 应用，再通过 WebSocket 连接到我们的 Node.js 代理。</li>
+                            <li><span class="font-semibold">命令与事件流转:</span> 所有操作指令和状态事件都在这条链路中双向传递，完成调试闭环。</li>
+                        </ol>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 2: Protocol -->
+            <section id="protocol" class="content-section">
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-2">核心协议: Chrome DevTools Protocol (CDP)</h2>
+                    <p class="text-slate-600 mb-8">CDP 是整个调试工具的基石。它是一个基于 WebSocket 的 JSON-RPC 协议，定义了与浏览器内核交互的标准化命令和事件。协议按功能划分为不同的“域”（Domains），如 DOM、Debugger、Network 等。</p>
+                    <h3 class="text-xl font-semibold mb-4">CDP 交互示例</h3>
+                    <div class="md:flex md:space-x-6">
+                        <div class="flex-1 mb-4 md:mb-0">
+                            <label for="cdp-command-selector" class="block text-sm font-medium text-slate-700 mb-2">选择一个 CDP 命令:</label>
+                            <select id="cdp-command-selector" class="w-full p-2 border border-slate-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                                <option value="dom" selected>DOM.getDocument</option>
+                                <option value="runtime">Runtime.evaluate</option>
+                                <option value="network">Network.enable</option>
+                            </select>
+                        </div>
+                        <div class="flex-1">
+                            <p class="text-sm font-medium text-slate-700 mb-2">交互说明:</p>
+                            <p id="cdp-explanation" class="text-sm text-slate-600 bg-slate-50 p-3 rounded-md h-full">获取整个页面的 DOM 树结构。这是构建“元素”面板的第一步。</p>
+                        </div>
+                    </div>
+                    <div class="grid md:grid-cols-2 gap-6 mt-6">
+                        <div>
+                            <h4 class="font-semibold mb-2">发送命令 (Request)</h4>
+                            <pre><code id="cdp-request-code"></code></pre>
+                        </div>
+                        <div>
+                            <h4 class="font-semibold mb-2">接收响应 (Response) / 事件 (Event)</h4>
+                            <pre><code id="cdp-response-code"></code></pre>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 3: Stack -->
+            <section id="stack" class="content-section">
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-2">技术栈选型</h2>
+                    <p class="text-slate-600 mb-8">我们选择了一套现代化且高效的技术栈来构建这个工具，确保了开发效率和最终产品的性能。</p>
+                    <div class="grid md:grid-cols-2 gap-8">
+                        <div>
+                            <h3 class="text-xl font-semibold mb-4 border-l-4 border-blue-500 pl-3">前端 (Frontend)</h3>
+                            <ul class="space-y-3">
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">UI 框架:</span> <span class="text-slate-700">React (或 Vue)</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">语言:</span> <span class="text-slate-700">TypeScript</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">状态管理:</span> <span class="text-slate-700">Redux Toolkit / Zustand</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">代码编辑器:</span> <span class="text-slate-700">Monaco Editor</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">构建工具:</span> <span class="text-slate-700">Vite</span></li>
+                            </ul>
+                        </div>
+                        <div>
+                            <h3 class="text-xl font-semibold mb-4 border-l-4 border-emerald-500 pl-3">后端 (Backend)</h3>
+                            <ul class="space-y-3">
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">框架:</span> <span class="text-slate-700">Node.js (Express / NestJS)</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">语言:</span> <span class="text-slate-700">TypeScript</span></li>
+                                <li class="flex items-start"><span class="font-semibold w-32 shrink-0">WebSocket:</span> <span class="text-slate-700">ws 库</span></li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 4: Features -->
+            <section id="features" class="content-section">
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-2">核心功能实现路径</h2>
+                    <p class="text-slate-600 mb-8">每个 DevTools 功能面板的背后，都是一系列精心设计的 CDP 命令和事件监听。这里展示了几个核心功能的实现逻辑。</p>
+                    <div class="flex space-x-2 border-b border-slate-200 mb-6">
+                        <button class="tab-btn active px-4 py-2 rounded-t-md text-sm font-medium" data-tab="elements">元素审查</button>
+                        <button class="tab-btn px-4 py-2 rounded-t-md text-sm font-medium" data-tab="console">控制台</button>
+                        <button class="tab-btn px-4 py-2 rounded-t-md text-sm font-medium" data-tab="sources">源代码调试</button>
+                        <button class="tab-btn px-4 py-2 rounded-t-md text-sm font-medium" data-tab="network">网络监控</button>
+                    </div>
+                    <div id="features-content">
+                        <div id="elements" class="tab-content active">
+                            <h3 class="text-lg font-semibold mb-3">元素审查 (Elements Panel)</h3>
+                            <ul class="list-disc list-inside space-y-2 text-slate-700">
+                                <li><span class="font-semibold">获取 DOM 树:</span> 调用 `DOM.getDocument` 获取完整节点树。</li>
+                                <li><span class="font-semibold">监听变化:</span> 监听 `DOM.setChildNodes` 等事件来实时更新 UI。</li>
+                                <li><span class="font-semibold">高亮节点:</span> 调用 `DOM.highlightNode` 在目标页面高亮显示元素。</li>
+                                <li><span class="font-semibold">获取样式:</span> 调用 `CSS.getComputedStyleForNode` 获取计算样式。</li>
+                            </ul>
+                        </div>
+                        <div id="console" class="tab-content">
+                            <h3 class="text-lg font-semibold mb-3">控制台 (Console Panel)</h3>
+                             <ul class="list-disc list-inside space-y-2 text-slate-700">
+                                <li><span class="font-semibold">显示日志:</span> 监听 `Runtime.consoleAPICalled` 事件来捕获 `console.log` 等输出。</li>
+                                <li><span class="font-semibold">执行代码:</span> 调用 `Runtime.evaluate` 在目标页面上下文中执行任意 JavaScript 表达式。</li>
+                            </ul>
+                        </div>
+                        <div id="sources" class="tab-content">
+                            <h3 class="text-lg font-semibold mb-3">源代码调试 (Sources Panel)</h3>
+                             <ul class="list-disc list-inside space-y-2 text-slate-700">
+                                <li><span class="font-semibold">加载脚本:</span> 监听 `Debugger.scriptParsed` 事件，然后调用 `Debugger.getScriptSource` 获取源码。</li>
+                                <li><span class="font-semibold">设置断点:</span> 调用 `Debugger.setBreakpointByUrl` 在指定行设置断点。</li>
+                                <li><span class="font-semibold">控制执行:</span> 监听 `Debugger.paused` 事件，并提供 `resume`, `stepOver` 等操作。</li>
+                            </ul>
+                        </div>
+                        <div id="network" class="tab-content">
+                            <h3 class="text-lg font-semibold mb-3">网络监控 (Network Panel)</h3>
+                             <ul class="list-disc list-inside space-y-2 text-slate-700">
+                                <li><span class="font-semibold">开启监控:</span> 调用 `Network.enable` 开始捕获网络活动。</li>
+                                <li><span class="font-semibold">监听生命周期:</span> 监听 `Network.requestWillBeSent`, `Network.responseReceived`, `Network.loadingFinished` 等一系列事件。</li>
+                                <li><span class="font-semibold">获取内容:</span> 调用 `Network.getResponseBody` 获取请求的响应体。</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Section 5: Roadmap -->
+            <section id="roadmap" class="content-section">
+                <div class="bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold mb-2">实施路线图</h2>
+                    <p class="text-slate-600 mb-8">项目将分阶段进行，从核心通信链路到逐步完善各项功能，确保项目稳步推进。</p>
+                    <div class="space-y-6 border-l-2 border-slate-200 ml-3">
+                        <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-blue-500 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段一: 基础通信</h4>
+                            <p class="text-slate-600">搭建前后端 WebSocket 通信，打通命令发送和结果回显的闭环。</p>
+                        </div>
+                        <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-slate-300 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段二: 实现控制台</h4>
+                            <p class="text-slate-600">完整实现控制台的日志显示和代码执行功能。</p>
+                        </div>
+                         <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-slate-300 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段三: 实现元素审查</h4>
+                            <p class="text-slate-600">完成 DOM 树的渲染、节点高亮和样式查看。</p>
+                        </div>
+                        <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-slate-300 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段四: 源代码调试</h4>
+                            <p class="text-slate-600">集成 Monaco Editor，实现断点设置和基本的调试控制流程。</p>
+                        </div>
+                        <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-slate-300 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段五: 网络监控</h4>
+                            <p class="text-slate-600">完成网络请求的捕获、展示和详情查看。</p>
+                        </div>
+                        <div class="relative pl-8">
+                            <div class="absolute -left-[11px] top-1 w-5 h-5 bg-slate-300 rounded-full border-4 border-white"></div>
+                            <h4 class="font-bold text-lg">阶段六: 完善与优化</h4>
+                            <p class="text-slate-600">增加 Local Storage、Cookies 面板，优化性能，提升用户体验。</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const navLinks = document.querySelectorAll('.nav-link');
+            const contentSections = document.querySelectorAll('.content-section');
+
+            const tabButtons = document.querySelectorAll('.tab-btn');
+            const tabContents = document.querySelectorAll('.tab-content');
+
+            const cdpSelector = document.getElementById('cdp-command-selector');
+            const cdpExplanation = document.getElementById('cdp-explanation');
+            const cdpRequestCode = document.getElementById('cdp-request-code');
+            const cdpResponseCode = document.getElementById('cdp-response-code');
+
+            const cdpData = {
+                dom: {
+                    explanation: '获取整个页面的 DOM 树结构。这是构建“元素”面板的第一步。',
+                    request: JSON.stringify({ id: 1, method: 'DOM.getDocument', params: { depth: -1 } }, null, 2),
+                    response: JSON.stringify({ id: 1, result: { root: { nodeId: 1, nodeName: 'HTML', children: '[...]' } } }, null, 2)
+                },
+                runtime: {
+                    explanation: '在目标页面的上下文中执行 JavaScript 表达式，并返回结果。',
+                    request: JSON.stringify({ id: 2, method: 'Runtime.evaluate', params: { expression: '1 + 1' } }, null, 2),
+                    response: JSON.stringify({ id: 2, result: { result: { type: 'number', value: 2, description: '2' } } }, null, 2)
+                },
+                network: {
+                    explanation: '开启网络监控，之后将开始接收到所有网络活动的生命周期事件。',
+                    request: JSON.stringify({ id: 3, method: 'Network.enable', params: {} }, null, 2),
+                    response: JSON.stringify({ method: 'Network.requestWillBeSent', params: { requestId: '...', request: { url: '...' } } }, null, 2)
+                }
+            };
+
+            function updateCdpExample(selectedValue) {
+                const data = cdpData[selectedValue];
+                cdpExplanation.textContent = data.explanation;
+                cdpRequestCode.textContent = data.request;
+                cdpResponseCode.textContent = data.response;
+            }
+
+            cdpSelector.addEventListener('change', (event) => {
+                updateCdpExample(event.target.value);
+            });
+            
+            updateCdpExample('dom');
+
+            function switchView(targetId) {
+                navLinks.forEach(link => {
+                    link.classList.toggle('active', link.dataset.target === targetId);
+                });
+                contentSections.forEach(section => {
+                    section.classList.toggle('active', section.id === targetId);
+                });
+            }
+
+            navLinks.forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const targetId = e.target.dataset.target;
+                    switchView(targetId);
+                    window.location.hash = targetId;
+                });
+            });
+
+            tabButtons.forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const targetTab = e.target.dataset.tab;
+
+                    tabButtons.forEach(btn => btn.classList.remove('active'));
+                    e.target.classList.add('active');
+
+                    tabContents.forEach(content => {
+                        content.classList.toggle('active', content.id === targetTab);
+                    });
+                });
+            });
+
+            const initialHash = window.location.hash.substring(1);
+            if (initialHash) {
+                const targetSection = document.getElementById(initialHash);
+                if (targetSection) {
+                    switchView(initialHash);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
