@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vue DevTools SPA 实现</title>
+    <script src="https://unpkg.com/vue@3.4.27/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide-vue-next@0.378.0/dist/lucide-vue-next.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+            background-color: #f1f5f9;
+            color: #334155;
+        }
+        .tab-btn.active {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+            color: #2563eb;
+        }
+        .file-item.active {
+            background-color: #dbeafe;
+        }
+        .line-number {
+            cursor: pointer;
+            padding: 0 8px;
+            text-align: right;
+            color: #94a3b8;
+        }
+        .line-number:hover {
+            color: #3b82f6;
+        }
+        .line-content {
+            white-space: pre;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="h-screen w-screen flex flex-col antialiased"></div>
+
+    <script type="module">
+        const { createApp, ref, reactive, onMounted, computed, defineComponent } = Vue;
+
+        // ---------------------------------------------------
+        // 模拟后端 CDP (Chrome DevTools Protocol) 服务
+        // ---------------------------------------------------
+        class MockCDP {
+            constructor() {
+                this.listeners = {};
+                this.scriptCounter = 0;
+                this.logCounter = 0;
+                this.netCounter = 0;
+
+                this.data = {
+                    scriptSources: {
+                        'script-1.js': `console.log("DevTools a pp started.");\n\nfunction calculate(a, b) {\n  const result = a + b;\n  // Transpiled from MY_CONST in main.my-script\n  const factor = 2;\n  return result * factor;\n}\n\ncalculate(10, 5);`,
+                        'main.my-script': `// This is a custom file type.\n// It will be transpiled to JavaScript.\n\nACTION calculate(a, b) {\n  MY_CONST factor = 2\n  RETURN a + b * factor\n}`,
+                        'style.css': `body {\n  font-family: sans-serif;\n  background-color: #fff;\n}`
+                    },
+                    sourceMap: {
+                        'main.my-script': {
+                            '4': 4, // ACTION calculate -> function calculate
+                            '5': 6, // MY_CONST factor -> const factor
+                            '6': 7  // RETURN a + b * factor -> return result * factor
+                        }
+                    },
+                    domTree: {
+                        nodeId: 1, name: 'HTML', children: [
+                            { nodeId: 2, name: 'HEAD', children: [] },
+                            { nodeId: 3, name: 'BODY', children: [
+                                { nodeId: 4, name: 'DIV', attributes: { id: 'root' }, children: [
+                                    { nodeId: 5, name: 'H1', children: [{ nodeId: 6, name: '#text', text: 'Welcome' }] }
+                                ]}
+                            ]}
+                        ]
+                    },
+                    networkRequests: [
+                        { id: 1, url: '/api/user', method: 'GET', status: 200, type: 'fetch' },
+                        { id: 2, url: '/assets/logo.png', method: 'GET', status: 200, type: 'img' },
+                        { id: 3, url: '/api/data', method: 'POST', status: 404, type: 'fetch' },
+                    ]
+                };
+            }
+
+            on(eventName, callback) {
+                if (!this.listeners[eventName]) {
+                    this.listeners[eventName] = [];
+                }
+                this.listeners[eventName].push(callback);
+            }
+
+            emit(eventName, data) {
+                if (this.listeners[eventName]) {
+                    this.listeners[eventName].forEach(cb => cb(data));
+                }
+            }
+            
+            start() {
+                // 模拟脚本解析事件
+                setTimeout(() => this.emit('Debugger.scriptParsed', { scriptId: 'script-1.js', url: 'https://app.com/script-1.js' }), 500);
+                setTimeout(() => this.emit('Debugger.scriptParsed', { scriptId: 'main.my-script', url: 'https://app.com/main.my-script', sourceMapURL: 'main.js.map' }), 600);
+                setTimeout(() => this.emit('Debugger.scriptParsed', { scriptId: 'style.css', url: 'https://app.com/style.css' }), 700);
+                
+                // 模拟日志输出
+                setInterval(() => {
+                    this.logCounter++;
+                    this.emit('Runtime.consoleAPICalled', { type: 'log', args: [`Message from target: ${this.logCounter}`], timestamp: Date.now() });
+                }, 5000);
+
+                // 模拟网络请求
+                setInterval(() => {
+                    this.netCounter++;
+                    this.emit('Network.requestWillBeSent', { id: 100 + this.netCounter, url: `/api/live/${this.netCounter}`, method: 'GET', status: 200, type: 'fetch' });
+                }, 8000);
+            }
+
+            // 模拟 API 调用
+            call(method, params) {
+                return new Promise(resolve => {
+                    setTimeout(() => {
+                        if (method === 'DOM.getDocument') {
+                            resolve(this.data.domTree);
+                        } else if (method === 'Debugger.getScriptSource') {
+                            resolve({ scriptSource: this.data.scriptSources[params.scriptId] || 'Source not found' });
+                        } else if (method === 'Network.getAll') {
+                            resolve(this.data.networkRequests);
+                        } else {
+                            resolve({});
+                        }
+                    }, 300);
+                });
+            }
+        }
+
+        // ---------------------------------------------------
+        // 状态管理 (类 Pinia Store)
+        // ---------------------------------------------------
+        const store = reactive({
+            logs: [],
+            domRoot: null,
+            scripts: [],
+            activeScript: { id: null, content: '' },
+            networkRequests: [],
+            
+            addLog(log) {
+                this.logs.unshift(log);
+                if (this.logs.length > 100) this.logs.pop();
+            },
+            addScript(script) {
+                this.scripts.push(script);
+            },
+            addNetworkRequest(req) {
+                this.networkRequests.unshift(req);
+            },
+            async fetchDomTree(cdp) {
+                this.domRoot = await cdp.call('DOM.getDocument');
+            },
+            async fetchInitialNetworkRequests(cdp) {
+                this.networkRequests = await cdp.call('Network.getAll');
+            },
+            async setActiveScript(cdp, scriptId) {
+                if (this.activeScript.id === scriptId) return;
+                const { scriptSource } = await cdp.call('Debugger.getScriptSource', { scriptId });
+                this.activeScript.id = scriptId;
+                this.activeScript.content = scriptSource;
+            }
+        });
+
+        // ---------------------------------------------------
+        // Vue 组件
+        // ---------------------------------------------------
+        const ConsolePanel = defineComponent({
+            template: `
+                <div class="h-full flex flex-col p-2 bg-white">
+                    <div class="flex-1 overflow-y-auto border rounded-md p-2 font-mono text-sm">
+                        <div v-for="(log, i) in store.logs" :key="i" class="border-b py-1" :class="{'text-red-600': log.type === 'error'}">
+                           <span class="text-gray-400 mr-2">{{ new Date(log.timestamp).toLocaleTimeString() }}</span>
+                           <span>{{ log.args.join(' ') }}</span>
+                        </div>
+                    </div>
+                    <div class="mt-2 flex items-center">
+                        <lucide-chevron-right class="text-gray-500" :size="20"></lucide-chevron-right>
+                        <input type="text" placeholder="在此处输入 JavaScript..." class="flex-1 p-2 bg-gray-100 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                </div>
+            `,
+            setup() {
+                return { store };
+            }
+        });
+
+        const DomNode = defineComponent({
+            name: 'DomNode',
+            props: ['node'],
+            template: `
+                <div class="ml-4 font-mono text-sm">
+                    <div>
+                        <span class="text-gray-400">&lt;</span><span class="text-purple-600">{{ node.name.toLowerCase() }}</span>
+                        <span v-for="(val, key) in node.attributes" class="ml-2">
+                            <span class="text-red-500">{{ key }}</span><span class="text-gray-400">="</span><span class="text-blue-600">{{ val }}</span><span class="text-gray-400">"</span>
+                        </span>
+                        <span class="text-gray-400">&gt;</span>
+                    </div>
+                    <div v-if="node.children">
+                        <dom-node v-for="child in node.children" :key="child.nodeId" :node="child"></dom-node>
+                    </div>
+                     <div v-if="node.text" class="ml-4">{{ node.text }}</div>
+                    <div v-if="node.name !== '#text'">
+                        <span class="text-gray-400">&lt;/</span><span class="text-purple-600">{{ node.name.toLowerCase() }}</span><span class="text-gray-400">&gt;</span>
+                    </div>
+                </div>
+            `,
+        });
+
+        const ElementsPanel = defineComponent({
+            components: { DomNode },
+            template: `
+                <div class="p-4 bg-white overflow-auto">
+                    <dom-node v-if="store.domRoot" :node="store.domRoot"></dom-node>
+                </div>
+            `,
+            setup() {
+                return { store };
+            }
+        });
+
+        const SourcesPanel = defineComponent({
+            template: `
+                <div class="h-full flex bg-white">
+                    <div class="w-1/4 border-r overflow-y-auto">
+                        <div class="p-2 font-semibold text-sm border-b">文件</div>
+                        <ul>
+                            <li v-for="script in store.scripts" :key="script.scriptId" 
+                                @click="selectScript(script.scriptId)"
+                                class="p-2 text-sm cursor-pointer hover:bg-gray-100 file-item"
+                                :class="{ 'active': store.activeScript.id === script.scriptId }">
+                                {{ script.scriptId }}
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="w-3/4 flex flex-col overflow-auto">
+                        <div class="p-2 border-b text-sm font-mono">{{ activeFileUrl }}</div>
+                        <div class="flex-1 font-mono text-sm overflow-auto">
+                            <div v-for="(line, i) in lines" :key="i" class="flex hover:bg-gray-50">
+                                <div class="line-number" @click="setBreakpoint(i + 1)">{{ i + 1 }}</div>
+                                <div class="line-content">{{ line }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            setup() {
+                const cdp = new MockCDP(); // In a real app, this would be injected
+                const lines = computed(() => store.activeScript.content.split('\\n'));
+                const activeFileUrl = computed(() => {
+                    const script = store.scripts.find(s => s.scriptId === store.activeScript.id);
+                    return script ? script.url : '未选择文件';
+                });
+
+                const selectScript = (scriptId) => {
+                    store.setActiveScript(cdp, scriptId);
+                };
+
+                const setBreakpoint = (lineNumber) => {
+                    if (store.activeScript.id !== 'main.my-script') {
+                        console.log(`在 ${store.activeScript.id} 的第 ${lineNumber} 行设置了断点。`);
+                        return;
+                    }
+                    
+                    const mappedLine = cdp.data.sourceMap['main.my-script'][lineNumber];
+                    console.log('--- Source Map 调试信息 ---');
+                    console.log(`自定义文件断点: main.my-script, 第 ${lineNumber} 行`);
+                    if (mappedLine) {
+                        console.log(`通过 Source Map 映射到 -> script-1.js, 第 ${mappedLine} 行`);
+                    } else {
+                        console.log(`当前行在 Source Map 中没有直接映射。`);
+                    }
+                    console.log('---------------------------');
+                };
+
+                return { store, lines, activeFileUrl, selectScript, setBreakpoint };
+            }
+        });
+
+        const NetworkPanel = defineComponent({
+            template: `
+                <div class="p-2 bg-white h-full overflow-auto">
+                    <table class="w-full text-sm text-left">
+                        <thead class="sticky top-0 bg-gray-50">
+                            <tr>
+                                <th class="p-2 font-semibold">名称</th>
+                                <th class="p-2 font-semibold">方法</th>
+                                <th class="p-2 font-semibold">状态</th>
+                                <th class="p-2 font-semibold">类型</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="req in store.networkRequests" :key="req.id" class="border-b hover:bg-gray-50">
+                                <td class="p-2 truncate">{{ req.url }}</td>
+                                <td class="p-2">{{ req.method }}</td>
+                                <td class="p-2" :class="req.status === 200 ? 'text-green-600' : 'text-red-600'">{{ req.status }}</td>
+                                <td class="p-2">{{ req.type }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            `,
+            setup() {
+                return { store };
+            }
+        });
+
+        // ---------------------------------------------------
+        // 主应用
+        // ---------------------------------------------------
+        const App = defineComponent({
+            components: { ConsolePanel, ElementsPanel, SourcesPanel, NetworkPanel },
+            template: `
+                <div class="p-4 h-full flex flex-col">
+                    <h1 class="text-2xl font-bold text-slate-800 mb-4">Vue DevTools 概念实现</h1>
+                    <div class="flex-1 flex flex-col border bg-white rounded-lg shadow-lg overflow-hidden">
+                        <div class="flex border-b">
+                            <button v-for="tab in tabs" :key="tab.id" @click="activeTab = tab.id" 
+                                    class="tab-btn px-4 py-2 text-sm font-medium border-b-2"
+                                    :class="{ 'active': activeTab === tab.id }">
+                                {{ tab.name }}
+                            </button>
+                        </div>
+                        <div class="flex-1 overflow-hidden">
+                            <component :is="activeComponent"></component>
+                        </div>
+                    </div>
+                </div>
+            `,
+            setup() {
+                const activeTab = ref('console');
+                const tabs = [
+                    { id: 'console', name: '控制台', component: 'ConsolePanel' },
+                    { id: 'elements', name: '元素', component: 'ElementsPanel' },
+                    { id: 'sources', name: '源代码', component: 'SourcesPanel' },
+                    { id: 'network', name: '网络', component: 'NetworkPanel' },
+                ];
+
+                const activeComponent = computed(() => tabs.find(t => t.id === activeTab.value).component);
+
+                onMounted(() => {
+                    const cdp = new MockCDP();
+                    
+                    cdp.on('Runtime.consoleAPICalled', (log) => store.addLog(log));
+                    cdp.on('Debugger.scriptParsed', (script) => store.addScript(script));
+                    cdp.on('Network.requestWillBeSent', (req) => store.addNetworkRequest(req));
+                    
+                    store.fetchDomTree(cdp);
+                    store.fetchInitialNetworkRequests(cdp);
+                    
+                    cdp.start();
+                });
+
+                return { activeTab, tabs, activeComponent };
+            }
+        });
+
+        const app = createApp(App);
+        app.use(LucideVueNext);
+        app.mount('#app');
+    </script>
+</body>
+</html>
