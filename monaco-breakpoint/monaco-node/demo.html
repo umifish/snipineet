@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monaco Editor - Breakpoint Debugging Demo</title>
+    <style>
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+        display: flex;
+        flex-direction: column;
+      }
+      .toolbar {
+        padding: 10px;
+        background-color: #f0f0f0;
+        border-bottom: 1px solid #ccc;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .toolbar button {
+        padding: 8px 12px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        background-color: #fff;
+        cursor: pointer;
+        transition: background-color 0.2s;
+      }
+      .toolbar button:hover {
+        background-color: #e6e6e6;
+      }
+      .toolbar button:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+      #container {
+        flex-grow: 1;
+        width: 100%;
+      }
+      /* 断点图标的 CSS 类 */
+      .breakpoint-glyph {
+        background: #e53935; /* 红色 */
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      /* 当前执行行高亮的 CSS 类 */
+      .current-line-highlight {
+        background-color: #fff59d; /* 淡黄色 */
+        iswholeline: true;
+      }
+      /* 当前执行行在行号左侧的箭头图标 */
+      .current-line-arrow-glyph {
+        background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="%23FFC107" d="M10 8L4.5 13.5V2.5L10 8z"/></svg>')
+          center center no-repeat;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="run-debug-btn">▶️ 运行调试</button>
+      <button id="continue-btn" disabled>➡️ 继续</button>
+      <button id="step-over-btn" disabled>↪️ 单步跳过</button>
+      <button id="stop-btn" disabled>⏹️ 停止</button>
+    </div>
+    <div id="container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js"></script>
+    <script>
+      require.config({
+        paths: {
+          vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs",
+        },
+      });
+
+      require(["vs/editor/editor.main"], function () {
+        const editorContainer = document.getElementById("container");
+        const runDebugBtn = document.getElementById("run-debug-btn");
+        const continueBtn = document.getElementById("continue-btn");
+        const stepOverBtn = document.getElementById("step-over-btn");
+        const stopBtn = document.getElementById("stop-btn");
+
+        const editor = monaco.editor.create(editorContainer, {
+          value: `function calculateSum(a, b) {\n    console.log("开始计算...");\n    let sum = a + b;\n    console.log("a 和 b 的和是:", sum);\n    return sum;\n}\n\nlet x = 10;\nlet y = 20;\nlet result = calculateSum(x, y);\nconsole.log("最终结果:", result);\n`,
+          language: "javascript",
+          theme: "vs-dark",
+          glyphMargin: true, // 必须开启才能显示断点图标
+          automaticLayout: true,
+        });
+
+        let breakpoints = []; // 存储断点行号
+        let breakpointDecorations = []; // 存储断点装饰器 ID
+        let currentLineDecoration = []; // 存储当前行高亮装饰器 ID
+        let debuggerEngine = null;
+
+        // --- UI 交互: 设置/取消断点 ---
+        editor.onMouseDown(function (e) {
+          if (
+            e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+          ) {
+            const lineNumber = e.target.position.lineNumber;
+            toggleBreakpoint(lineNumber);
+          }
+        });
+
+        function toggleBreakpoint(lineNumber) {
+          const bpIndex = breakpoints.indexOf(lineNumber);
+          if (bpIndex > -1) {
+            breakpoints.splice(bpIndex, 1);
+          } else {
+            breakpoints.push(lineNumber);
+          }
+          updateBreakpointDecorations();
+        }
+
+        function updateBreakpointDecorations() {
+          const decorations = breakpoints.map((line) => ({
+            range: new monaco.Range(line, 1, line, 1),
+            options: {
+              isWholeLine: false,
+              glyphMarginClassName: "breakpoint-glyph",
+              stickiness:
+                monaco.editor.TrackedRangeStickiness
+                  .NeverGrowsWhenTypingAtEdges,
+            },
+          }));
+          breakpointDecorations = editor.deltaDecorations(
+            breakpointDecorations,
+            decorations
+          );
+        }
+
+        // --- 模拟调试器引擎 ---
+        class SimpleDebuggerEngine {
+          constructor(code, breakpoints) {
+            this.lines = code.split("\n");
+            this.breakpoints = breakpoints;
+            this.currentLine = 1;
+            this.isPaused = false;
+            this.isStopped = false;
+            this.onPause = null;
+            this.onEnd = null;
+          }
+
+          run() {
+            this.isPaused = false;
+            this.execute();
+          }
+
+          execute() {
+            if (this.isStopped || this.isPaused) return;
+
+            while (this.currentLine <= this.lines.length) {
+              // 跳过空行
+              if (this.lines[this.currentLine - 1].trim() === "") {
+                this.currentLine++;
+                continue;
+              }
+
+              // 检查是否命中-断点
+              if (this.breakpoints.includes(this.currentLine)) {
+                this.pause(this.currentLine);
+                return; // 暂停执行
+              }
+
+              // 模拟执行一行
+              console.log(
+                `执行第 ${this.currentLine} 行: ${
+                  this.lines[this.currentLine - 1]
+                }`
+              );
+              this.currentLine++;
+            }
+
+            // 执行结束
+            this.stop();
+          }
+
+          pause(lineNumber) {
+            this.isPaused = true;
+            if (this.onPause) {
+              this.onPause(lineNumber);
+            }
+          }
+
+          continue() {
+            this.isPaused = false;
+            this.currentLine++; // 从下一行开始
+            this.execute();
+          }
+
+          stepOver() {
+            if (!this.isPaused) return;
+
+            // 模拟执行当前行
+            console.log(
+              `单步执行第 ${this.currentLine} 行: ${
+                this.lines[this.currentLine - 1]
+              }`
+            );
+
+            this.currentLine++;
+            // 寻找下一个非空行并暂停
+            while (
+              this.currentLine <= this.lines.length &&
+              this.lines[this.currentLine - 1].trim() === ""
+            ) {
+              this.currentLine++;
+            }
+
+            if (this.currentLine > this.lines.length) {
+              this.stop();
+            } else {
+              this.pause(this.currentLine);
+            }
+          }
+
+          stop() {
+            this.isStopped = true;
+            if (this.onEnd) {
+              this.onEnd();
+            }
+          }
+        }
+
+        // --- 控制逻辑 ---
+        runDebugBtn.addEventListener("click", () => {
+          const code = editor.getValue();
+          debuggerEngine = new SimpleDebuggerEngine(code, breakpoints);
+
+          debuggerEngine.onPause = (lineNumber) => {
+            highlightCurrentLine(lineNumber);
+            updateButtonStates(true, true);
+          };
+
+          debuggerEngine.onEnd = () => {
+            clearCurrentLineHighlight();
+            updateButtonStates(false, false);
+            debuggerEngine = null;
+          };
+
+          updateButtonStates(true, false);
+          debuggerEngine.run();
+        });
+
+        continueBtn.addEventListener("click", () => {
+          if (debuggerEngine && debuggerEngine.isPaused) {
+            clearCurrentLineHighlight();
+            updateButtonStates(true, false);
+            debuggerEngine.continue();
+          }
+        });
+
+        stepOverBtn.addEventListener("click", () => {
+          if (debuggerEngine && debuggerEngine.isPaused) {
+            clearCurrentLineHighlight();
+            debuggerEngine.stepOver();
+          }
+        });
+
+        stopBtn.addEventListener("click", () => {
+          if (debuggerEngine) {
+            debuggerEngine.stop();
+          }
+        });
+
+        function highlightCurrentLine(lineNumber) {
+          currentLineDecoration = editor.deltaDecorations(
+            currentLineDecoration,
+            [
+              {
+                range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+                options: {
+                  isWholeLine: true,
+                  className: "current-line-highlight",
+                  glyphMarginClassName: "current-line-arrow-glyph",
+                },
+              },
+            ]
+          );
+        }
+
+        function clearCurrentLineHighlight() {
+          currentLineDecoration = editor.deltaDecorations(
+            currentLineDecoration,
+            []
+          );
+        }
+
+        function updateButtonStates(isDebugging, isPaused) {
+          runDebugBtn.disabled = isDebugging;
+          stopBtn.disabled = !isDebugging;
+          continueBtn.disabled = !isPaused;
+          stepOverBtn.disabled = !isPaused;
+        }
+      });
+    </script>
+  </body>
+</html>
