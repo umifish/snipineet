@@ -86,14 +86,14 @@ function App() {
 
   return (
     <>
-      <div style={{ width: "600px", height: "450px" }}>
+      <div style={{ width: "80vw", height: "80vh" }}>
         <Editor
           onChange={(value) => {
             setCode(value!);
           }}
           theme="vs-dark"
           value={code}
-          language="python"
+          language="javascript"
           onMount={handleEditorDidMount}
           options={{ glyphMargin: true, folding: false }}
         />
