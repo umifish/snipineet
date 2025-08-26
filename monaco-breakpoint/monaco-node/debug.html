@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monaco Editor - DAP Debugging Client</title>
+    <style>
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: sans-serif;
+        display: flex;
+        flex-direction: column;
+      }
+      .toolbar {
+        padding: 10px;
+        background-color: #f0f0f0;
+        border-bottom: 1px solid #ccc;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .toolbar button {
+        padding: 8px 12px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        background-color: #fff;
+        cursor: pointer;
+        transition: background-color 0.2s;
+      }
+      .toolbar button:hover {
+        background-color: #e6e6e6;
+      }
+      .toolbar button:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+      #container {
+        flex-grow: 1;
+        width: 100%;
+      }
+      .breakpoint-glyph {
+        background: #e53935;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      .current-line-highlight {
+        background-color: #fff59d;
+        iswholeline: true;
+      }
+      .current-line-arrow-glyph {
+        background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="%23FFC107" d="M10 8L4.5 13.5V2.5L10 8z"/></svg>')
+          center center no-repeat;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button id="run-debug-btn">▶️ 运行调试</button>
+      <button id="stop-btn" disabled>⏹️ 停止</button>
+    </div>
+    <div id="container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs/loader.js"></script>
+    <script>
+      require.config({
+        paths: {
+          vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.49.0/min/vs",
+        },
+      });
+
+      require(["vs/editor/editor.main"], function () {
+        const editorContainer = document.getElementById("container");
+        const runDebugBtn = document.getElementById("run-debug-btn");
+        const stopBtn = document.getElementById("stop-btn");
+
+        const editor = monaco.editor.create(editorContainer, {
+          value: `class Greeter {\n    void sayHello() {\n        def name = "Groovy"\n        println "Hello, $name!" // 在这里设置一个断点\n    }\n}\n\ndef g = new Greeter()\ng.sayHello()\n`,
+          language: "groovy", // 假设 groovy 语言高亮已注册
+          theme: "vs-dark",
+          glyphMargin: true,
+          automaticLayout: true,
+        });
+
+        let breakpoints = [];
+        let breakpointDecorations = [];
+        let ws = null;
+        let messageCounter = 1;
+
+        // --- 断点 UI ---
+        editor.onMouseDown((e) => {
+          if (
+            e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+          ) {
+            toggleBreakpoint(e.target.position.lineNumber);
+          }
+        });
+
+        function toggleBreakpoint(lineNumber) {
+          const bpIndex = breakpoints.indexOf(lineNumber);
+          if (bpIndex > -1) breakpoints.splice(bpIndex, 1);
+          else breakpoints.push(lineNumber);
+          updateBreakpointDecorations();
+        }
+
+        function updateBreakpointDecorations() {
+          breakpointDecorations = editor.deltaDecorations(
+            breakpointDecorations,
+            breakpoints.map((line) => ({
+              range: new monaco.Range(line, 1, line, 1),
+              options: { glyphMarginClassName: "breakpoint-glyph" },
+            }))
+          );
+        }
+
+        // --- DAP 通信 ---
+        function connectToDebugServer() {
+          ws = new WebSocket("ws://localhost:3000");
+
+          ws.onopen = () => {
+            console.log("[Client] Connected to debug server.");
+            // 1. 发送 initialize 请求
+            sendRequest("initialize", { adapterId: "groovy" });
+          };
+
+          ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            console.log("[Client] Received:", message);
+            handleDAPMessage(message);
+          };
+
+          ws.onclose = () => {
+            console.log("[Client] Disconnected from debug server.");
+            updateButtonStates(false);
+          };
+        }
+
+        function sendRequest(command, args = {}) {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            console.error("WebSocket is not connected.");
+            return;
+          }
+          const request = {
+            seq: messageCounter++,
+            type: "request",
+            command: command,
+            arguments: args,
+          };
+          console.log("[Client] Sending:", request);
+          ws.send(JSON.stringify(request));
+        }
+
+        function handleDAPMessage(message) {
+          if (message.type === "response" && message.command === "initialize") {
+            // 2. 发送 launch 请求
+            sendRequest("launch", { code: editor.getValue() });
+          } else if (
+            message.type === "response" &&
+            message.command === "launch"
+          ) {
+            // 3. 发送 setBreakpoints 请求
+            sendRequest("setBreakpoints", {
+              source: { path: "script.groovy" }, // 路径仅为标识
+              breakpoints: breakpoints.map((line) => ({ line })),
+            });
+          } else if (
+            message.type === "response" &&
+            message.command === "setBreakpoints"
+          ) {
+            // 4. 发送 configurationDone 请求
+            sendRequest("configurationDone");
+          } else if (
+            message.type === "event" &&
+            message.event === "terminated"
+          ) {
+            alert("调试会话已结束。");
+            ws.close();
+          }
+        }
+
+        // --- 控制逻辑 ---
+        runDebugBtn.addEventListener("click", () => {
+          connectToDebugServer();
+          updateButtonStates(true);
+        });
+
+        stopBtn.addEventListener("click", () => {
+          if (ws) {
+            sendRequest("disconnect");
+            ws.close();
+          }
+          updateButtonStates(false);
+        });
+
+        function updateButtonStates(isDebugging) {
+          runDebugBtn.disabled = isDebugging;
+          stopBtn.disabled = !isDebugging;
+        }
+      });
+    </script>
+  </body>
+</html>
