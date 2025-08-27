@@ -1,15 +1,8 @@
 /*
- * --- 2. server.js ---
- * 这是调试适配器服务的核心实现。
- * 将此代码保存为 `server.js`。
- *
- * **运行前请确保:**
  * 1. 你已经安装了 Node.js 和 npm。
  * 2. 你已经安装了 Java 和 Groovy，并且 `groovy` 命令在你的系统路径中可用。
  * 3. 运行 `npm install` 安装了上述依赖。
  */
-
-/* server.js */
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
@@ -22,10 +15,9 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const PORT = 3000;
+const PORT = 9999;
 let messageCounter = 1;
 
-// 监听 WebSocket 连接
 wss.on("connection", (ws) => {
   console.log("[Server] Client connected.");
 

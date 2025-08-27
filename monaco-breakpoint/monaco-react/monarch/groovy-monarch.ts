@@ -1,10 +1,31 @@
-export const groovyConf = {
-  // 语言的注释符号
+/**
+ * This file contains the Monarch language definition for the Groovy language,
+ * rewritten in TypeScript.
+ *
+ * To use this in your project, you'll need to have the `monaco-editor` package installed
+ * to get the necessary type definitions.
+ *
+ * @example
+ * import * as monaco from 'monaco-editor';
+ * import { groovyConfiguration, groovyLanguageDefinition } from './groovy-monarch';
+ *
+ * monaco.languages.register({ id: 'groovy' });
+ * monaco.languages.setMonarchTokensProvider('groovy', groovyLanguageDefinition);
+ * monaco.languages.setLanguageConfiguration('groovy', groovyConfiguration);
+ */
+
+// Import types from the Monaco Editor API
+import type { languages } from "monaco-editor";
+
+/**
+ * Language configuration for Groovy.
+ * Defines settings like comments, brackets, and auto-closing pairs.
+ */
+export const groovyConfiguration: languages.LanguageConfiguration = {
   comments: {
     lineComment: "//",
     blockComment: ["/*", "*/"],
   },
-  // 自动括号匹配
   brackets: [
     ["{", "}"],
     ["[", "]"],
@@ -16,7 +37,6 @@ export const groovyConf = {
     { open: "(", close: ")" },
     { open: "'", close: "'", notIn: ["string", "comment"] },
     { open: '"', close: '"', notIn: ["string", "comment"] },
-    { open: "`", close: "`", notIn: ["string", "comment"] },
   ],
   surroundingPairs: [
     { open: "{", close: "}" },
@@ -24,11 +44,13 @@ export const groovyConf = {
     { open: "(", close: ")" },
     { open: "'", close: "'" },
     { open: '"', close: '"' },
-    { open: "`", close: "`" },
   ],
 };
 
-export const groovyLanguage = {
+/**
+ * Monarch language definition for Groovy syntax highlighting.
+ */
+export const groovyLanguageDefinition: languages.IMonarchLanguage = {
   defaultToken: "invalid",
   tokenPostfix: ".groovy",
 
@@ -126,33 +148,28 @@ export const groovyLanguage = {
     "**",
     "?.",
     "*.",
+    "..",
+    "...",
   ],
 
-  // 我们使用 C# 的符号定义，因为它很全面
   symbols: /[=><!~?:&|+\-*\/\^%]+/,
 
-  // C# style strings
   escapes:
     /\\(?:[abfnrtv\\"']|x[0-9A-Fa-f]{1,4}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})/,
 
   tokenizer: {
     root: [
-      // identifiers and keywords
       [
         /[a-zA-Z_$][\w$]*/,
         {
           cases: {
-            "@typeKeywords": "keyword",
+            "@typeKeywords": "keyword.type",
             "@keywords": "keyword",
             "@default": "identifier",
           },
         },
       ],
-
-      // whitespace
       { include: "@whitespace" },
-
-      // delimiters and operators
       [/[{}()\[\]]/, "@brackets"],
       [/[<>](?!@symbols)/, "@brackets"],
       [
@@ -164,24 +181,17 @@ export const groovyLanguage = {
           },
         },
       ],
-
-      // @ annotations.
       [/@\s*[a-zA-Z_\$][\w\$]*/, "annotation"],
-
-      // numbers
       [/\d*\.\d+([eE][\-+]?\d+)?/, "number.float"],
       [/0[xX][0-9a-fA-F]+/, "number.hex"],
       [/\d+/, "number"],
-
-      // delimiter: after number because of .\d floats
       [/[;,.]/, "delimiter"],
-
-      // strings
-      [/"([^"\\]|\\.)*$/, "string.invalid"], // non-teminated string
-      [/'([^'\\]|\\.)*$/, "string.invalid"], // non-teminated string
-      [/"/, "string", "@string_double"],
-      [/'/, "string", "@string_single"],
-      [/`/, "string", "@string_gstring"],
+      [/"([^"\\]|\\.)*$/, "string.invalid"],
+      [/'([^'\\]|\\.)*$/, "string.invalid"],
+      [/"""/, { token: "string", next: "@gstring_double" }],
+      [/"/, { token: "string", next: "@string_double" }],
+      [/'''/, { token: "string", next: "@string_single" }],
+      [/'/, { token: "string", next: "@string_single" }],
     ],
 
     whitespace: [
@@ -197,10 +207,19 @@ export const groovyLanguage = {
     ],
 
     string_double: [
-      [/[^\\"]+/, "string"],
+      [/[^\\"$]+/, "string"],
       [/@escapes/, "string.escape"],
+      [/\$/, "string.escape", "@gstring_variable"],
       [/\\./, "string.escape.invalid"],
       [/"/, "string", "@pop"],
+    ],
+
+    gstring_double: [
+      [/[^\\"$]+/, "string"],
+      [/@escapes/, "string.escape"],
+      [/\$/, "string.escape", "@gstring_variable"],
+      [/\\./, "string.escape.invalid"],
+      [/"""/, "string", "@pop"],
     ],
 
     string_single: [
@@ -210,17 +229,12 @@ export const groovyLanguage = {
       [/'/, "string", "@pop"],
     ],
 
-    // GString (Groovy's interpolated string)
-    string_gstring: [
-      [/\$\{/, { token: "delimiter", next: "@gstring_variable" }],
-      [/[^\\`$]+/, "string"],
-      [/@escapes/, "string.escape"],
-      [/\\./, "string.escape.invalid"],
-      [/`/, "string", "@pop"],
-    ],
     gstring_variable: [
-      [/[a-zA-Z_][\w\.]*/, "identifier"],
-      [/\}/, { token: "delimiter", next: "@pop" }],
+      [/\$([a-zA-Z_]\w*)/, "identifier"],
+      [/\{/, "delimiter", "@gstring_expression"],
+      ["", "", "@pop"],
     ],
+
+    gstring_expression: [[/}/, "delimiter", "@pop"], { include: "root" }],
   },
 };
