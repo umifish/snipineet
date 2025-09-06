@@ -13,7 +13,7 @@
           <div class="tree-container">
             <h4 class="tree-title">源数据</h4>
             <el-input
-              v-model="filterText"
+              v-model="sourceFilterText"
               placeholder="输入关键字进行过滤"
               class="filter-input"
               clearable
@@ -25,24 +25,39 @@
               node-key="id"
               :props="treeProps"
               :default-expand-all="false"
-              :filter-node-method="filterNode"
+              :filter-node-method="filterSourceNode"
               @check="handleSourceTreeCheck"
             />
           </div>
         </el-col>
 
         <el-col :span="12">
-          <div class="tree-container">
-            <h4 class="tree-title">已选数据</h4>
-            <el-tree
-              ref="selectedTreeRef"
-              :data="selectedDataState"
-              node-key="id"
-              :props="treeProps"
-              :default-expand-all="true"
-              show-checkbox
-              @check="handleSelectedTreeCheck"
+          <div class="list-container">
+            <h4 class="list-title">
+              已选数据 ({{ selectedItemsFlat.length }})
+            </h4>
+            <el-input
+              v-model="selectedFilterText"
+              placeholder="筛选已选数据"
+              class="filter-input"
+              clearable
             />
+            <el-scrollbar class="virtual-list-wrapper">
+              <el-virtual-list
+                :data="filteredSelectedItems"
+                :item-size="36"
+                style="height: 100%"
+              >
+                <template #default="{ item }">
+                  <div class="selected-item">
+                    <span class="item-label">{{ item[treeProps.label] }}</span>
+                    <el-icon class="remove-icon" @click="removeItem(item)">
+                      <Close />
+                    </el-icon>
+                  </div>
+                </template>
+              </el-virtual-list>
+            </el-scrollbar>
           </div>
         </el-col>
       </el-row>
@@ -51,9 +66,9 @@
     <template #footer>
       <div class="dialog-footer">
         <el-button @click="handleCancel">取 消</el-button>
-        <el-button
-          type="primary"
-          :loading="confirmLoading"
+        <el-button 
+          type="primary" 
+          :loading="confirmLoading" 
           @click="handleConfirm"
         >
           保 存
@@ -64,172 +79,152 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from "vue";
+import { ref, watch, nextTick, computed } from 'vue';
+import { Close } from '@element-plus/icons-vue';
 
-// --- 定义组件的 Props 和 Emits ---
-
+// --- Props and Emits (与之前版本相同) ---
 const props = defineProps({
-  // ... (visible, title, sourceData, initialSelectedData, treeProps 等 props 保持不变)
   visible: { type: Boolean, required: true },
-  title: { type: String, default: "数据勾选" },
+  title: { type: String, default: '数据勾选' },
   sourceData: { type: Array, default: null },
-  initialSelectedData: { type: Array, default: null },
-  treeProps: {
-    type: Object,
-    default: () => ({ label: "label", children: "children" }),
-  },
-
-  // --- 异步加载函数 Props ---
-  // loadSourceApi 和 loadSelectedApi 用于在组件内部加载数据
+  initialSelectedData: { type: Array, default: null }, // 依然接收树形结构，组件内部会处理
+  treeProps: { type: Object, default: () => ({ label: 'label', children: 'children' }) },
   loadSourceApi: { type: Function, default: null },
   loadSelectedApi: { type: Function, default: null },
-
-  // 新增：接收一个用于保存的异步函数
-  // 这个函数应该返回一个 Promise
-  onConfirm: {
-    type: Function,
-    required: true,
-  },
+  onConfirm: { type: Function, required: true },
 });
+const emit = defineEmits(['update:visible']);
 
-const emit = defineEmits(["update:visible"]);
 
-// --- 组件内部状态 ---
-
-// [新增] 整个对话框内容区域的加载状态 (用于初始数据加载)
+// --- 内部状态 ---
 const loading = ref(false);
-// [新增] 保存按钮的加载状态
 const confirmLoading = ref(false);
-
 const sourceTreeRef = ref(null);
-const selectedTreeRef = ref(null);
-const filterText = ref("");
+
 const sourceDataState = ref([]);
-const selectedDataState = ref([]);
+const sourceFilterText = ref('');
+const selectedFilterText = ref(''); // [新增] 右侧列表的筛选文本
+
+// [变更] selectedDataState 变为 selectedItemsFlat，存储扁平化后的已选节点数组
+const selectedItemsFlat = ref([]);
 
 // --- 核心逻辑 ---
 
-/**
- * @description 初始化组件数据, 增加了 loading 状态的控制
- */
-const initializeData = async () => {
-  loading.value = true; // 打开加载遮罩
-  try {
-    // 优先使用 props 传入的静态数据
-    if (props.sourceData) {
-      sourceDataState.value = props.sourceData;
-    }
-    // 否则, 如果提供了 API 函数, 则调用它
-    else if (typeof props.loadSourceApi === "function") {
-      sourceDataState.value = await props.loadSourceApi();
-    }
+// [新增] 计算属性，用于前端筛选右侧列表
+const filteredSelectedItems = computed(() => {
+  const filter = selectedFilterText.value.trim().toLowerCase();
+  if (!filter) {
+    return selectedItemsFlat.value;
+  }
+  return selectedItemsFlat.value.filter(item =>
+    item[props.treeProps.label].toLowerCase().includes(filter)
+  );
+});
 
-    if (props.initialSelectedData) {
-      selectedDataState.value = props.initialSelectedData;
-    } else if (typeof props.loadSelectedApi === "function") {
-      selectedDataState.value = await props.loadSelectedApi();
+/**
+ * @description [新增] 移除右侧列表中的一项
+ * @param {object} itemToRemove - 要移除的节点对象
+ */
+const removeItem = (itemToRemove) => {
+  // 1. 从右侧扁平列表中移除
+  selectedItemsFlat.value = selectedItemsFlat.value.filter(item => item.id !== itemToRemove.id);
+  // 2. 同步更新左侧树的勾选状态
+  if (sourceTreeRef.value) {
+    sourceTreeRef.value.setChecked(itemToRemove.id, false, false); // 第二个参数false表示不递归
+  }
+};
+
+/**
+ * @description [逻辑变更] 当左侧树的勾选状态变化时
+ */
+const handleSourceTreeCheck = () => {
+  if (!sourceTreeRef.value) return;
+  // getCheckedNodes(false, false) 只返回被勾选的节点，不包含半选状态的父节点
+  // 这正是扁平化列表所需要的数据
+  selectedItemsFlat.value = sourceTreeRef.value.getCheckedNodes(false, false);
+};
+
+// [新增] 辅助函数：将树形结构扁平化
+const flattenTree = (treeData) => {
+  const flatList = [];
+  const traverse = (nodes) => {
+    if (!nodes || nodes.length === 0) return;
+    for (const node of nodes) {
+      flatList.push(node);
+      if (node[props.treeProps.children]) {
+        traverse(node[props.treeProps.children]);
+      }
     }
+  };
+  traverse(treeData);
+  return flatList;
+};
+
+// [逻辑变更] 初始化数据
+const initializeData = async () => {
+  loading.value = true;
+  try {
+    // 加载源数据 (逻辑不变)
+    sourceDataState.value = props.sourceData || (await props.loadSourceApi?.()) || [];
+    
+    // 加载已选数据并扁平化
+    const selectedTreeData = props.initialSelectedData || (await props.loadSelectedApi?.()) || [];
+    selectedItemsFlat.value = flattenTree(selectedTreeData);
 
     await nextTick();
     syncCheckState();
   } catch (error) {
-    console.error("Failed to load tree data:", error);
+    console.error('Failed to load tree data:', error);
   } finally {
-    loading.value = false; // 关闭加载遮罩
+    loading.value = false;
   }
 };
 
-/**
- * @description 确认按钮点击事件 - [逻辑重构]
- */
-const handleConfirm = async () => {
-  if (typeof props.onConfirm !== "function") {
-    console.error("The onConfirm prop must be a function.");
-    return;
-  }
-
-  const selectedIds = selectedTreeRef.value.getCheckedKeys(false);
-  const selectedNodes = selectedTreeRef.value.getCheckedNodes(false, false);
-
-  confirmLoading.value = true; // 开启按钮加载状态
-  try {
-    // 调用父组件传入的 onConfirm 函数, 并将数据传递出去
-    // 使用 await 等待父组件的异步操作 (如API调用) 完成
-    await props.onConfirm(selectedIds, selectedNodes);
-
-    // 异步操作成功后, 关闭对话框
-    emit("update:visible", false);
-  } catch (error) {
-    // 如果父组件的 onConfirm 函数抛出错误, 可以在这里捕获
-    console.error("Error during confirm action:", error);
-    // 此时不关闭对话框, 方便用户重试
-  } finally {
-    confirmLoading.value = false; // 无论成功或失败, 都关闭按钮加载状态
-  }
-};
-
-// ... 其他方法 (handleCancel, handleSourceTreeCheck, handleSelectedTreeCheck, filterNode, syncCheckState, extractIdsFromTree 等) 保持不变
-const handleCancel = () => {
-  emit("update:visible", false);
-};
-const handleSourceTreeCheck = () => {
-  selectedDataState.value = sourceTreeRef.value.getCheckedNodes(false, true);
-  nextTick(() => {
-    const ids = extractIdsFromTree(selectedDataState.value);
-    selectedTreeRef.value.setCheckedKeys(ids, false);
-  });
-};
-const handleSelectedTreeCheck = () => {
-  const keys = selectedTreeRef.value.getCheckedKeys();
-  sourceTreeRef.value.setCheckedKeys(keys, false);
-  handleSourceTreeCheck();
-};
-const filterNode = (value, data) =>
-  !value || data[props.treeProps.label].includes(value);
+// [逻辑变更] 同步勾选状态
 const syncCheckState = () => {
-  if (!sourceTreeRef.value || !selectedTreeRef.value) return;
-  const ids = extractIdsFromTree(selectedDataState.value);
-  sourceTreeRef.value.setCheckedKeys(ids, false);
-  selectedTreeRef.value.setCheckedKeys(ids, false);
-};
-const extractIdsFromTree = (treeData) => {
-  const ids = [];
-  const traverse = (nodes) => {
-    if (!nodes || !nodes.length) return;
-    for (const node of nodes) {
-      ids.push(node.id);
-      if (node[props.treeProps.children])
-        traverse(node[props.treeProps.children]);
-    }
-  };
-  traverse(treeData);
-  return ids;
+    if (!sourceTreeRef.value) return;
+    // 从扁平列表中提取 ID
+    const selectedIds = selectedItemsFlat.value.map(item => item.id);
+    sourceTreeRef.value.setCheckedKeys(selectedIds, false);
 };
 
-// --- 监听器 ---
-watch(filterText, (val) => {
-  sourceTreeRef.value.filter(val);
-});
-watch(
-  () => props.visible,
-  (newVal) => {
-    if (newVal) {
-      initializeData();
-    } else {
-      sourceDataState.value = [];
-      selectedDataState.value = [];
-      filterText.value = "";
-    }
+// [逻辑变更] 确认按钮点击事件
+const handleConfirm = async () => {
+  const selectedIds = selectedItemsFlat.value.map(item => item.id);
+  const selectedNodes = selectedItemsFlat.value; // 直接使用扁平列表
+
+  confirmLoading.value = true;
+  try {
+    await props.onConfirm(selectedIds, selectedNodes);
+    emit('update:visible', false);
+  } catch (error) {
+    console.error('Error during confirm action:', error);
+  } finally {
+    confirmLoading.value = false;
   }
-);
+};
+
+// --- 其他函数 (基本不变) ---
+const handleCancel = () => { emit('update:visible', false); };
+const filterSourceNode = (value, data) => !value || data[props.treeProps.label].includes(value);
+
+watch(sourceFilterText, (val) => { sourceTreeRef.value.filter(val); });
+watch(() => props.visible, (newVal) => {
+  if (newVal) {
+    initializeData();
+  } else {
+    // 清理状态
+    sourceDataState.value = [];
+    selectedItemsFlat.value = [];
+    sourceFilterText.value = '';
+    selectedFilterText.value = '';
+  }
+});
 </script>
 
 <style scoped>
-/* 样式与之前版本相同 */
-.dialog-content {
-  min-height: 60vh;
-}
-.tree-container {
+.dialog-content { min-height: 60vh; }
+.tree-container, .list-container {
   border: 1px solid #dcdfe6;
   border-radius: 4px;
   padding: 15px;
@@ -237,23 +232,39 @@ watch(
   display: flex;
   flex-direction: column;
 }
-.tree-title {
+.tree-title, .list-title {
   margin: 0 0 10px;
   font-size: 16px;
 }
-.filter-input {
-  margin-bottom: 10px;
-}
-.el-tree {
+.filter-input { margin-bottom: 10px; }
+.el-tree { flex-grow: 1; overflow-y: auto; }
+.el-tree::-webkit-scrollbar { width: 6px; height: 6px; }
+.el-tree::-webkit-scrollbar-thumb { background-color: #ddd; border-radius: 3px; }
+
+/* [新增] 虚拟列表样式 */
+.virtual-list-wrapper {
   flex-grow: 1;
-  overflow-y: auto;
 }
-.el-tree::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+.selected-item {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
 }
-.el-tree::-webkit-scrollbar-thumb {
-  background-color: #ddd;
-  border-radius: 3px;
+.item-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-grow: 1;
+}
+.remove-icon {
+  cursor: pointer;
+  color: #909399;
+  margin-left: 10px;
+  flex-shrink: 0;
+}
+.remove-icon:hover {
+  color: #f56c6c;
 }
 </style>
