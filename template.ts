@@ -138,3 +138,53 @@ export type Message =
       data: EmptyPayload;
       extraData?: Record<string, any>;
     };
+
+// src/utils/message.ts
+
+/**
+ * 消息生成函数
+ *
+ * 根据消息类型、来源和业务数据，生成一个完整的、符合 AppMessage 接口的消息对象。
+ *
+ * @param type 消息类型，必须是 MessageType 中的一种。
+ * @param source 消息来源，包含组件名和实例ID。
+ * @param data 消息携带的业务数据，其类型必须与 type 匹配。
+ * @param extraData 可选的额外数据，用于临时或非标准信息。
+ * @returns 返回一个类型安全的 AppMessage 对象。
+ */
+export const createMessage = <T extends MessageType>(
+  type: T,
+  source: MessageSource,
+  data: Message extends { metadata: { type: T }; data: infer P } ? P : never,
+  extraData?: Record<string, any>
+): Message => {
+  const metadata = {
+    messageId: uuidv4(),
+    source: source,
+    timestamp: Date.now(),
+    type: type,
+    version: "1.0",
+  };
+
+  const message = {
+    metadata,
+    data,
+    ...(extraData && { extraData }),
+  };
+
+  return message as Message;
+};
+
+const handleNodeClick = () => {
+  // TypeScript 会自动推断出 data 必须是 { resourceId: string } 类型
+  const message: Message = createMessage(
+    "resourceTree.openNode",
+    { componentName: props.componentName, instanceId: props.nodeId },
+    { resourceId: props.nodeId }
+  );
+
+  if (emitter) {
+    // 发送消息
+    emitter.emit(message.metadata.type, message);
+  }
+};
