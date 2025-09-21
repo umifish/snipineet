@@ -22,7 +22,11 @@ export interface BaseMessageMetadata {
 /**
  * 可兼容的消息类型
  */
-export type MessageType = 'task.reordered' | 'task.status_updated' | 'board.clear_all' | 'board.task_created';
+export type MessageType =
+  | "task.reordered"
+  | "task.status_updated"
+  | "board.clear_all"
+  | "board.task_created";
 
 /**
  * 定义不同消息类型的业务数据 (Payload)
@@ -39,8 +43,8 @@ export interface TaskReorderedPayload {
 // 任务状态更新的消息数据
 export interface TaskStatusUpdatedPayload {
   taskId: string;
-  oldStatus: 'pending' | 'completed';
-  newStatus: 'pending' | 'completed';
+  oldStatus: "pending" | "completed";
+  newStatus: "pending" | "completed";
 }
 
 // 清空所有任务的消息数据
@@ -61,7 +65,19 @@ export interface BoardTaskCreatedPayload {
  * 这让 TypeScript 能够根据 `metadata.type` 智能推断 `data` 的类型。
  */
 export type AppMessage =
-  | { metadata: BaseMessageMetadata & { type: 'task.reordered' }; data: TaskReorderedPayload }
-  | { metadata: BaseMessageMetadata & { type: 'task.status_updated' }; data: TaskStatusUpdatedPayload }
-  | { metadata: BaseMessageMetadata & { type: 'board.clear_all' }; data: BoardClearAllPayload }
-  | { metadata: BaseMessageMetadata & { type: 'board.task_created' }; data: BoardTaskCreatedPayload };
+  | {
+      metadata: BaseMessageMetadata & { type: "task.reordered" };
+      data: TaskReorderedPayload;
+    }
+  | {
+      metadata: BaseMessageMetadata & { type: "task.status_updated" };
+      data: TaskStatusUpdatedPayload;
+    }
+  | {
+      metadata: BaseMessageMetadata & { type: "board.clear_all" };
+      data: BoardClearAllPayload;
+    }
+  | {
+      metadata: BaseMessageMetadata & { type: "board.task_created" };
+      data: BoardTaskCreatedPayload;
+    };
