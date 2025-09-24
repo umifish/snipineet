@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Koa WebSocket</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      #messages {
+        border: 1px solid #ccc;
+        padding: 10px;
+        height: 300px;
+        overflow-y: scroll;
+        margin-top: 10px;
+        margin-bottom: 10px;
+      }
+      .system {
+        color: gray;
+        font-style: italic;
+      }
+      .scheduled {
+        color: purple;
+        font-weight: bold;
+      }
+      .user-message {
+        margin: 5px 0;
+        padding: 5px;
+        border-radius: 5px;
+        background: #f0f0f0;
+      }
+      .sender-me {
+        background: #d4edda;
+        text-align: right;
+      }
+      .sender-other {
+        background: #ffeeba;
+      }
+      #chat-input-area {
+        display: flex;
+      }
+      #message-input {
+        flex-grow: 1;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        margin-right: 10px;
+      }
+      #send-button {
+        padding: 10px 15px;
+        background-color: #007bff;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Koa WebSocket 双向通信</h1>
+    <p>
+      连接状态: <span id="status" style="color: red">断开</span> | 您的 ID:
+      <span id="my-id">等待连接...</span>
+    </p>
+
+    <div id="messages"></div>
+
+    <div id="chat-input-area">
+      <input
+        type="text"
+        id="message-input"
+        placeholder="输入您的消息..."
+        disabled
+      />
+      <button id="send-button" disabled>发送</button>
+    </div>
+
+    <script>
+      const statusEl = document.getElementById("status");
+      const myIdEl = document.getElementById("my-id");
+      const messagesEl = document.getElementById("messages");
+      const messageInput = document.getElementById("message-input");
+      const sendButton = document.getElementById("send-button");
+
+      const wsUrl = `ws://localhost:3000`;
+      let ws;
+      let myClientId = null; // 存储当前客户端的 ID
+
+      function log(message, className = "") {
+        const p = document.createElement("div");
+        p.classList.add(className);
+        p.innerHTML = message;
+        messagesEl.appendChild(p);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      // 发送消息的函数
+      function sendMessage() {
+        const text = messageInput.value.trim();
+        if (text && ws && ws.readyState === ws.OPEN) {
+          ws.send(text);
+          messageInput.value = ""; // 清空输入框
+        }
+      }
+
+      sendButton.addEventListener("click", sendMessage);
+      messageInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          sendMessage();
+        }
+      });
+
+      function handleConnectionStatus(isConnected) {
+        messageInput.disabled = !isConnected;
+        sendButton.disabled = !isConnected;
+        statusEl.textContent = isConnected ? "已连接" : "已断开";
+        statusEl.style.color = isConnected ? "green" : "red";
+        if (!isConnected) {
+          myIdEl.textContent = "等待连接...";
+          myClientId = null;
+        }
+      }
+
+      function connect() {
+        log("尝试连接...", "system");
+        handleConnectionStatus(false);
+
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          handleConnectionStatus(true);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+
+            switch (payload.type) {
+              case "SCHEDULED_TASK":
+                log(`**[定时任务通知]** ${payload.message}`, "scheduled");
+                break;
+
+              case "USER_JOINED":
+                log(`***系统***: ${payload.message}`, "system");
+                // 首次连接时，服务器返回的 JOIN 消息中会携带 ID，我们捕获它
+                if (!myClientId) {
+                  myClientId = payload.clientId;
+                  myIdEl.textContent = myClientId;
+                }
+                break;
+
+              case "USER_LEFT":
+                log(`***系统***: ${payload.message}`, "system");
+                break;
+
+              case "CHAT_MESSAGE":
+                const sender =
+                  payload.senderId === myClientId
+                    ? "我"
+                    : `用户 ${payload.senderId}`;
+                const className =
+                  payload.senderId === myClientId
+                    ? "user-message sender-me"
+                    : "user-message sender-other";
+                const formattedMessage = `
+                                <strong>${sender}</strong> (${payload.timestamp}):
+                                <div>${payload.message}</div>
+                            `;
+                log(formattedMessage, className);
+                break;
+
+              default:
+                log(`[未知消息] ${event.data}`, "system");
+                break;
+            }
+          } catch (e) {
+            // 非 JSON 格式的消息（通常不会发生，除非服务器发送了非标准格式）
+            log(`[服务器原始消息] ${event.data}`, "system");
+          }
+        };
+
+        ws.onclose = () => {
+          handleConnectionStatus(false);
+          log("连接已关闭，尝试 5 秒后重连...", "system");
+          setTimeout(connect, 5000);
+        };
+
+        ws.onerror = (error) => {
+          console.error("WebSocket 错误:", error);
+          log("WebSocket 发生错误，正在关闭连接...", "system");
+          ws.close();
+        };
+      }
+
+      connect(); // 启动连接
+    </script>
+  </body>
+</html>
