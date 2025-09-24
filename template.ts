@@ -139,8 +139,6 @@ export type Message =
       extraData?: Record<string, any>;
     };
 
-// src/utils/message.ts
-
 /**
  * 消息生成函数
  *
