@@ -1,0 +1,29 @@
+{
+  "name": "groovy-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --watch src --ext ts --exec \"npm run start:groovy:server\"",
+    "start:groovy:server": "tsc --noEmit && node --import=./loader.js ./src/server.ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "uuid": "^8.3.2",
+    "vscode-jsonrpc": "^8.1.0",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-ws-jsonrpc": "^3.0.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.2",
+    "@tsconfig/node24": "^24.0.1",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}

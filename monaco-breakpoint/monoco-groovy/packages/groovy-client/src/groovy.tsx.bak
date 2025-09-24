@@ -1,0 +1,280 @@
+import { useRef, useEffect, useState } from "react";
+import Editor, { useMonaco } from "@monaco-editor/react";
+import { MonacoEditorLanguageClientWrapper } from "monaco-editor-wrapper";
+import type * as Monaco from "monaco-editor";
+
+// DAP
+let dapSequence = 1;
+
+const code = `
+  class Person {
+      String name
+      int age
+
+      def greet() {
+          // GString (interpolated string)
+          def message = "Hello, my name is \${name} and I am \${age} years old."
+          println message
+      }
+  }
+
+  def p = new Person(name: 'Alice', age: 30)
+  p.greet()
+`;
+
+function GroovyEditor() {
+  const wrapperRef = useRef<MonacoEditorLanguageClientWrapper | null>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const monaco = useMonaco();
+  const [editorText, setEditorText] = useState(code);
+
+  // DAP state
+  const dapSocketRef = useRef<WebSocket | null>(null);
+  const decorationsRef = useRef<string[]>([]);
+
+  // --- LSP Initialization ---
+  useEffect(() => {
+    if (monaco && !wrapperRef.current) {
+      const wrapper = new MonacoEditorLanguageClientWrapper();
+      wrapperRef.current = wrapper;
+
+      const lspUrl = "ws://localhost:3001/groovy-lsp";
+      const languageId = "groovy";
+
+      // 配置 Language Client
+      const languageClientConfig = {
+        languageId: languageId,
+        name: "Groovy Language Client",
+        options: {
+          $type: "WebSocket",
+          url: lspUrl,
+          startOptions: {
+            onCall: (message: any) => console.log("LSP sending:", message),
+            reportStatus: true,
+          },
+          stopOptions: {
+            onCall: (message: any) => console.log("LSP stopping:", message),
+            reportStatus: true,
+          },
+        },
+      };
+
+      const startConfig: any = {
+        languageClientConfig: languageClientConfig,
+      };
+
+      // 启动 Wrapper
+      wrapper
+        // .init()
+        .start(startConfig)
+        .then(() => console.log("Monaco Editor Wrapper started successfully."))
+        .catch((error) =>
+          console.error("Error starting Monaco Editor Wrapper:", error)
+        );
+    }
+
+    return () => {
+      wrapperRef.current?.dispose();
+      wrapperRef.current = null;
+      console.log("Monaco Editor Wrapper disposed.");
+    };
+  }, [monaco]);
+
+  // --- DAP Connection and Logic ---
+  const connectDap = () => {
+    if (dapSocketRef.current) {
+      console.log("DAP already connected.");
+      return;
+    }
+
+    const socket = new WebSocket("ws://localhost:3001/groovy-dap");
+    dapSocketRef.current = socket;
+
+    socket.onopen = () => {
+      console.log("DAP WebSocket Connected.");
+
+      sendDapRequest("initialize", {
+        adapterID: "groovy",
+        linesStartAt1: true,
+        columnsStartAt1: true,
+        pathFormat: "path",
+      });
+    };
+
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      console.log("[DAP Response]:", message);
+
+      // Handle DAP events
+      if (message.type === "event") {
+        if (message.event === "initialized") {
+          const model = editorRef.current?.getModel();
+          if (!model) {
+            return;
+          }
+          const breakpoints = model
+            .getLinesContent()
+            .map((_, i) => i + 1)
+            .filter((line) =>
+              model.getLineContent(line).includes("// Set a breakpoint")
+            );
+
+          sendDapRequest("setBreakpoints", {
+            source: { path: "/path/to/your/script.groovy" }, // The path must match what the debug adapter expects
+            breakpoints: breakpoints.map((line) => ({ line })),
+          });
+        } else if (message.event === "stopped") {
+          const { threadId, line } = message.body;
+          console.log(`Execution stopped at line ${line}, thread ${threadId}`);
+          // Highlight the current line in the editor
+          if (editorRef.current && monaco) {
+            decorationsRef.current = editorRef.current.deltaDecorations(
+              decorationsRef.current,
+              [
+                {
+                  range: new monaco.Range(line, 1, line, 1),
+                  options: {
+                    isWholeLine: true,
+                    className: "current-execution-line",
+                    glyphMarginClassName: "current-execution-glyph",
+                  },
+                },
+              ]
+            );
+          }
+        }
+      } else if (
+        message.type === "response" &&
+        message.command === "setBreakpoints"
+      ) {
+        sendDapRequest("launch", {
+          program: "/path/to/your/script.groovy", // This path needs to be accessible by the DAP server
+          // The source code can also be passed directly if the DAP supports it
+        });
+      }
+    };
+
+    socket.onclose = () => {
+      console.log("DAP WebSocket Disconnected.");
+      dapSocketRef.current = null;
+    };
+    socket.onerror = (error) => console.error("DAP WebSocket Error:", error);
+  };
+
+  const sendDapRequest = (command: string, args: any) => {
+    if (
+      !dapSocketRef.current ||
+      dapSocketRef.current.readyState !== WebSocket.OPEN
+    ) {
+      console.error("DAP socket not connected.");
+      return;
+    }
+    const request = {
+      seq: dapSequence++,
+      type: "request",
+      command: command,
+      arguments: args,
+    };
+    const jsonStr = JSON.stringify(request);
+    console.log("[DAP Request]:", request);
+    // WebSocket does not require Content-Length framing
+    dapSocketRef.current.send(jsonStr);
+  };
+
+  const handleEditorDidMount = (
+    editor: Monaco.editor.IStandaloneCodeEditor,
+    monacoInstance: typeof import("monaco-editor")
+  ) => {
+    editorRef.current = editor;
+    console.log("Editor mounted");
+
+    // Add a margin for breakpoints
+    editor.updateOptions({ glyphMargin: true });
+
+    // Add action to set/remove breakpoint on glyph margin click
+    editor.onMouseDown((e) => {
+      if (
+        e.target.type ===
+        monacoInstance.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+      ) {
+        const line = e.target.position!.lineNumber;
+        const model = editor.getModel();
+        if (!model) {
+          return;
+        }
+        const existingBreakpoints = model
+          .getLineDecorations(line)
+          .filter((d) => d.options.glyphMarginClassName === "breakpoint-glyph");
+
+        if (existingBreakpoints.length > 0) {
+          editor.deltaDecorations(
+            existingBreakpoints.map((d) => d.id),
+            []
+          );
+        } else {
+          editor.deltaDecorations(
+            [],
+            [
+              {
+                range: new monacoInstance.Range(line, 1, line, 1),
+                options: {
+                  isWholeLine: false,
+                  glyphMarginClassName: "breakpoint-glyph",
+                },
+              },
+            ]
+          );
+        }
+      }
+    });
+  };
+
+  const startDebugging = () => {
+    if (!dapSocketRef.current) {
+      connectDap();
+    } else {
+      console.log("Already connected, re-launching...");
+      // Reset state and re-launch
+      if (editorRef.current) {
+        decorationsRef.current = editorRef.current.deltaDecorations(
+          decorationsRef.current,
+          []
+        );
+      }
+      // This is a simplified flow. A real implementation would handle state better.
+      sendDapRequest("launch", { program: "./grammar/script.groovy" });
+    }
+  };
+
+  const stepOver = () => {
+    sendDapRequest("next", { threadId: 1 }); // Assuming threadId is 1
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+      <div className="controls">
+        <button onClick={startDebugging}>Start/Restart Debugging</button>
+        <button onClick={stepOver}>Step Over</button>
+        {/* Add more buttons for Step In, Continue, etc. */}
+      </div>
+      <div style={{ flex: 1 }}>
+        <Editor
+          height="100%"
+          language="groovy"
+          value={editorText}
+          onMount={handleEditorDidMount}
+          onChange={(value) => setEditorText(value ?? "")}
+        />
+      </div>
+      <style>
+        {`
+          .breakpoint-glyph { background: red; border-radius: 50%; }
+          .current-execution-line { background: #f0f0a0; }
+          .current-execution-glyph { background: yellow; }
+        `}
+      </style>
+    </div>
+  );
+}
+
+export default GroovyEditor;

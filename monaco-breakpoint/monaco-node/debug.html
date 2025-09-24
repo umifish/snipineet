@@ -117,7 +117,7 @@
 
         // --- DAP 通信 ---
         function connectToDebugServer() {
-          ws = new WebSocket("ws://localhost:3000");
+          ws = new WebSocket("ws://localhost:9999");
 
           ws.onopen = () => {
             console.log("[Client] Connected to debug server.");

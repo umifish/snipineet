@@ -1,13 +1,12 @@
 import { useRef, useEffect, useState } from "react";
-import Editor, { loader, useMonaco } from "@monaco-editor/react";
-import { MonacoEditorLanguageClientWrapper } from "monaco-editor-wrapper";
-import type * as Monaco from "monaco-editor";
+import Editor, { useMonaco } from "@monaco-editor/react";
 
+import { loader } from "@monaco-editor/react";
 import {
   groovyConfiguration,
   groovyLanguageDefinition,
 } from "./monarch/groovy-monarch.ts";
-// import * as Monaco from "monaco-editor/esm/vs/editor/editor.api";
+import * as Monaco from "monaco-editor/esm/vs/editor/editor.api";
 import * as monaco from "monaco-editor";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
@@ -108,7 +107,7 @@ function App() {
   const [code, setCode] = useState(value);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor>(null);
 
-  const bpOption = {
+  const bpOption: Monaco.editor.IModelDecorationOptions = {
     isWholeLine: true,
     linesDecorationsClassName: "breakpoints",
     linesDecorationsTooltip: "点击添加断点",

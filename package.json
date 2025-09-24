@@ -1,0 +1,17 @@
+{
+  "name": "groovy-monaco",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "install:all": "npm install",
+    "start:server": "npm start --workspace=groovy-debug-server",
+    "start:client": "npm run dev --workspace=groovy-client",
+    "dev": "npm run start:server & npm run start:client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

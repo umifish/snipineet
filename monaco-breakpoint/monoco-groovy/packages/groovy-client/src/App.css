@@ -30,29 +30,3 @@
     animation: logo-spin infinite 20s linear;
   }
 }
-
-.breakpoints {
-  width: 10px !important;
-  height: 10px !important;
-  left: 5px !important;
-  top: 5px;
-  border-radius: 50%;
-  display: inline-block;
-  cursor: pointer;
-}
-
-.breakpoints:hover {
-  background-color: rgba(255, 0, 0, 0.5);
-}
-
-.breakpoints-active {
-  width: 10px !important;
-  height: 10px !important;
-  left: 5px !important;
-  top: 5px;
-  background-color: red;
-  border-radius: 50%;
-  display: inline-block;
-  cursor: pointer;
-  z-index: 5;
-}
