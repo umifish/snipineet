@@ -26,3 +26,5 @@ app.component("SvgIcon", SvgIcon);
 
 app.mount("#app");
 ```
+
+npm install -D vite-svg-loader
