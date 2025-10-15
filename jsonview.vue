@@ -1,13 +1,14 @@
 <template>
-  <div
-    class="json-viewer-container"
-    :style="{ 'padding-left': level * 16 + 'px' }"
-  >
+  <div class="json-viewer-container" :style="{ '--level': level }">
     <template v-if="level === 0 && !isContainer">
       <div class="json-node primitive-root-value">
-        <span :class="['value-content', `type-${dataType}`]">
-          {{ formatPrimitive(data) }}
-        </span>
+        <span class="toggle-placeholder"></span>
+        <span class="bracket-placeholder"></span>
+        <div class="json-content">
+          <span :class="['value-content', `type-${dataType}`]">
+            {{ formatPrimitive(data) }}
+          </span>
+        </div>
       </div>
     </template>
 
@@ -22,52 +23,74 @@
             : 'primitive-node',
         ]"
       >
-        <span class="key-label"
-          >{{ label }}<template v-if="!isContainer">:</template></span
-        >
-
-        <template v-if="isContainer">
-          <span @click="toggle" class="toggle-icon">
-            <svg v-if="isCollapsed" class="icon closed" viewBox="0 0 24 24">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            <svg v-else class="icon open" viewBox="0 0 24 24">
-              <path d="M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z" />
-            </svg>
-          </span>
-
-          <span :class="['container-symbol', dataType + '-type']">
-            {{
-              isCollapsed
-                ? isObject(data)
-                  ? `{...}`
-                  : `[...]`
-                : isObject(data)
-                ? "{"
-                : "["
-            }}
-          </span>
-        </template>
-
-        <div v-if="isContainer ? !isCollapsed : true" class="nested-content">
+        <span class="toggle-column">
           <template v-if="isContainer">
-            <JsonViewer
-              v-for="(value, key) in data"
-              :key="key"
-              :data="value"
-              :label="key"
-              :level="level + 1"
-            />
-            <span :class="['container-symbol', dataType + '-type']">
-              {{ isObject(data) ? "}" : "]" }}
+            <span @click="toggle" class="toggle-icon">
+              <svg v-if="isCollapsed" class="icon closed" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+              <svg v-else class="icon open" viewBox="0 0 24 24">
+                <path d="M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z" />
+              </svg>
             </span>
+          </template>
+        </span>
+
+        <span class="bracket-column">
+          <template v-if="isContainer">
+            <span :class="['container-symbol', dataType + '-type']">
+              {{
+                isCollapsed
+                  ? isObject(data)
+                    ? `{...}`
+                    : `[...]`
+                  : isObject(data)
+                  ? "{"
+                  : "["
+              }}
+            </span>
+          </template>
+        </span>
+
+        <div class="json-content">
+          <template v-if="showLabel">
+            <span class="key-label"
+              >{{ label }}<template v-if="!isContainer">:</template></span
+            >
           </template>
 
-          <template v-else>
-            <span :class="['value-content', `type-${dataType}`]">
-              {{ formatPrimitive(data) }}
-            </span>
-          </template>
+          <div v-if="isContainer ? !isCollapsed : true" class="nested-content">
+            <template v-if="isContainer">
+              <template v-for="(value, key, index) in data" :key="key">
+                <JsonViewer
+                  :data="value"
+                  :label="key"
+                  :level="level + 1"
+                  :show-label="isObject(data)"
+                />
+
+                <span v-if="index < containerSize - 1" class="separator-comma"
+                  >,</span
+                >
+              </template>
+
+              <span
+                :class="[
+                  'container-symbol',
+                  dataType + '-type',
+                  'closing-bracket',
+                ]"
+              >
+                {{ isObject(data) ? "}" : "]" }}
+              </span>
+            </template>
+
+            <template v-else>
+              <span :class="['value-content', `type-${dataType}`]">
+                {{ formatPrimitive(data) }}
+              </span>
+            </template>
+          </div>
         </div>
       </div>
     </template>
@@ -75,6 +98,7 @@
 </template>
 
 <script setup>
+// ... (Script setup 部分保持不变) ...
 import { ref, computed } from "vue";
 import JsonViewer from "./JsonViewer.vue";
 
@@ -83,7 +107,6 @@ const props = defineProps({
     type: [Object, Array, String, Number, Boolean, null],
     required: true,
   },
-  // 根节点传入的 label 默认为 'root'，但在 level 0 且非容器时不会使用
   label: {
     type: [String, Number],
     default: "root",
@@ -92,12 +115,14 @@ const props = defineProps({
     type: Number,
     default: 0,
   },
+  showLabel: {
+    type: Boolean,
+    default: true,
+  },
 });
 
-// 状态管理
 const isCollapsed = ref(props.level !== 0);
 
-// 辅助函数 & Computed 属性
 const isObject = (val) =>
   val !== null && typeof val === "object" && !Array.isArray(val);
 const isArray = (val) => Array.isArray(val);
@@ -107,10 +132,15 @@ const dataType = computed(() => {
   if (isObject(props.data)) return "object";
   if (isArray(props.data)) return "array";
   if (props.data === null) return "null";
-  return typeof props.data; // string, number, boolean
+  return typeof props.data;
 });
 
-// 格式化基本类型的值
+const containerSize = computed(() => {
+  if (isArray(props.data)) return props.data.length;
+  if (isObject(props.data)) return Object.keys(props.data).length;
+  return 0;
+});
+
 const formatPrimitive = (val) => {
   if (typeof val === "string") return `"${val}"`;
   if (val === null) return "null";
@@ -118,7 +148,6 @@ const formatPrimitive = (val) => {
   return String(val);
 };
 
-// 交互方法
 const toggle = () => {
   if (isContainer.value) {
     isCollapsed.value = !isCollapsed.value;
@@ -127,13 +156,22 @@ const toggle = () => {
 </script>
 
 <style scoped>
-/* 样式保持不变，确保了美观和规范性 */
+/* 定义 CSS 变量 */
 .json-viewer-container {
+  --arrow-width: 20px;
+  --bracket-width: 12px; /* 括号列的宽度 */
+  --indent-unit: 16px;
+
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier,
     monospace;
   font-size: 13px;
   line-height: 1.6;
   color: #333;
+}
+
+/* 核心布局：根据层级计算左边距 */
+.json-viewer-container {
+  padding-left: calc(var(--level) * var(--indent-unit));
 }
 
 .json-node {
@@ -144,12 +182,47 @@ const toggle = () => {
   white-space: pre-wrap;
 }
 
-/* 根级基本类型值，不需要额外的缩进或边框，样式应该在最顶层 */
-.primitive-root-value {
-  padding-left: 16px; /* 保持与根容器内边距一致 */
+/* 箭头列 */
+.toggle-column,
+.bracket-column,
+.toggle-placeholder,
+.bracket-placeholder {
+  height: 1.6em; /* 确保高度与行高一致 */
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+.toggle-column,
+.toggle-placeholder {
+  width: var(--arrow-width);
+}
+/* 括号列，居中对齐 */
+.bracket-column,
+.bracket-placeholder {
+  width: var(--bracket-width);
+  justify-content: center;
+  align-items: center;
 }
 
-/* 键名颜色 (所有节点) */
+/* 内容列 */
+.json-content {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+  /* 根节点的键和值是横向排列 */
+  flex-direction: row;
+}
+.json-content > .nested-content {
+  flex-direction: column;
+}
+/* 根级基本类型的值 */
+.primitive-root-value .json-content {
+  flex-direction: row;
+}
+
+/* 键名颜色 */
 .key-label {
   color: #a31515;
   font-weight: 600;
@@ -157,20 +230,50 @@ const toggle = () => {
   flex-shrink: 0;
 }
 
-/* 冒号处理：在 template 中通过 <template v-if="!isContainer">:</template> 实现 */
+/* 容器符号 ([], {}) 的颜色 */
+.container-symbol {
+  color: #666;
+  font-weight: 400;
+  user-select: none;
+}
+/* 起始括号单独在 .bracket-column 中，无需 margin */
+.bracket-column .container-symbol {
+  margin: 0;
+}
 
-/* 折叠图标 */
+/* 闭合括号定位：使用负 margin 将其拉回 Bracket Column 的下方 */
+.closing-bracket {
+  /* 抵消 content 的 padding-left (如果有的话) 和 Key/Value 的空间 */
+  /* 减去 箭头列 + 括号列 的总宽度，再加上一点偏移量 */
+  margin-left: calc(-1 * (var(--arrow-width) + var(--bracket-width) + 2px));
+  /* 确保闭合括号在单独的一行 */
+  width: 100%;
+  text-align: left;
+  display: block;
+  line-height: 1.6em;
+  padding-left: calc(
+    var(--arrow-width) + var(--bracket-width)
+  ); /* 占位，使其内容靠左 */
+}
+
+/* 嵌套内容：必须使用负 margin 抵消箭头和括号列，使其对齐到父级的 content */
+.nested-content {
+  /* 抵消箭头列和括号列的总宽度 */
+  margin-left: calc(-1 * (var(--arrow-width) + var(--bracket-width)));
+  display: block;
+  width: 100%;
+}
+
+/* 箭头图标 (保持不变) */
 .toggle-icon {
   width: 14px;
   height: 14px;
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-right: 6px;
   cursor: pointer;
   user-select: none;
   color: #888;
-  flex-shrink: 0;
 }
 .toggle-icon:hover {
   color: #000;
@@ -187,26 +290,15 @@ const toggle = () => {
   transform: rotate(90deg) translateY(-2px);
 }
 
-/* 容器符号 ([], {}) 的颜色 */
-.container-symbol {
+/* 逗号分隔符 */
+.separator-comma {
   color: #666;
-  font-weight: 400;
-  margin-left: 4px;
-  flex-shrink: 0;
+  margin-left: 2px;
+  user-select: none;
+  line-height: 1.6;
 }
 
-.nested-content {
-  margin-left: 0;
-  display: block;
-  width: 100%;
-}
-
-.value-content {
-  font-weight: normal;
-  word-break: break-all;
-}
-
-/* JSON 规范数据类型颜色定义 */
+/* JSON 规范数据类型颜色定义 (保持不变) */
 .type-string {
   color: #008000;
 }
@@ -221,12 +313,17 @@ const toggle = () => {
 }
 
 /* 容器美化样式 */
-.json-viewer-container:not([style*="padding-left: 0px"]) {
+/* 连接线调整：要对齐到 Bracket Column 的中心 */
+.json-viewer-container:not([style*="--level: 0"]) {
   border-left: 1px dotted #ddd;
-  margin-left: 8px;
-  padding-left: 8px !important;
+  /* 虚线对齐到 (箭头宽度 + 括号宽度) 的中心 */
+  margin-left: calc((var(--arrow-width) + var(--bracket-width)) / 2);
+  /* 调整 padding-left 使得内容列在视觉上对齐 */
+  padding-left: calc(
+    var(--indent-unit) - (var(--arrow-width) + var(--bracket-width)) / 2
+  ) !important;
 }
-.json-viewer-container[style*="padding-left: 0px"] {
+.json-viewer-container[style*="--level: 0"] {
   background-color: #ffffff;
   border: 1px solid #e5e5e5;
   border-radius: 6px;
@@ -234,7 +331,7 @@ const toggle = () => {
   padding: 10px 0 10px 0 !important;
   margin-bottom: 20px;
 }
-.json-viewer-container[style*="padding-left: 0px"] .json-node {
-  padding-left: 16px;
+.json-viewer-container[style*="--level: 0"] .json-node {
+  padding-left: var(--indent-unit);
 }
 </style>
