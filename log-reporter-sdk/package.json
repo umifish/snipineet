@@ -1,0 +1,33 @@
+{
+  "name": "log-reporter-sdk",
+  "version": "1.0.0",
+  "description": "企业级日志上报SDK，支持单例、时钟同步和多模块格式兼容。",
+  "type": "module",
+  "main": "dist/log-reporter-sdk.cjs.js",
+  "module": "dist/log-reporter-sdk.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "log",
+    "reporter",
+    "typescript",
+    "sdk",
+    "vite",
+    "microfrontend"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.2.2",
+    "vite": "^5.1.4",
+    "vite-plugin-dts": "^3.7.3"
+  }
+}

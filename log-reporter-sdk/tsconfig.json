@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    /* 项目配置 */
+    "target": "ES2020" /* 指定ECMAScript目标版本 */,
+    "module": "ESNext" /* 指定模块代码生成：使用 ESNext 以兼容现代打包器如 Vite/Rollup */,
+    "moduleResolution": "node" /* 模块解析策略：Node.js 兼容 */,
+    "lib": [
+      "ES2020",
+      "DOM",
+      "WebWorker"
+    ] /* 包含的运行时库：DOM 和 WebWorker 是为了 LogReporter 中的 window/navigator 兼容 */,
+    "outDir": "./dist" /* 编译输出目录，虽然 Vite 会控制最终 JS/CSS 输出，但 TypeScript 仍然需要它 */,
+    "rootDir": "./src" /* 仅编译 src 目录下的文件 */,
+    "allowJs": false /* 禁止编译 JavaScript 文件 */,
+
+    /* 模块解析 */
+    "esModuleInterop": true /* 启用 CJS/ESM 互操作性，确保 import/require 混合使用时的兼容性 */,
+    "forceConsistentCasingInFileNames": true /* 确保文件大小写一致性 */,
+    "resolveJsonModule": true /* 允许导入 .json 文件 */,
+
+    /* 类型检查 */
+    "strict": true /* 启用所有严格类型检查选项（强烈推荐用于高质量 SDK） */,
+    "skipLibCheck": true /* 跳过库文件的类型检查以加快编译速度 */,
+
+    /* 类型生成 */
+    "declaration": true /* 生成对应的 .d.ts 类型声明文件 (供 vite-plugin-dts 使用) */,
+    "declarationDir": "./types" /* 声明文件的输出目录 (vite-plugin-dts 可能会覆盖这个设置，但保留它以明确意图) */,
+    "emitDeclarationOnly": true /* 仅生成声明文件，不生成 JS 文件 (Vite/Rollup 负责 JS 生成) */
+  },
+
+  "include": ["src/**/*.ts"] /* 包含 src 目录下的所有 .ts 文件 */,
+  "exclude": ["node_modules"] /* 排除 node_modules 目录 */
+}
