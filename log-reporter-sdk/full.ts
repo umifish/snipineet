@@ -4,7 +4,7 @@
  */
 
 // ******************************************************
-// ***** 1. LogTypes 定义 *****
+// ***** 1. LogTypes & Interfaces 定义 *****
 // ******************************************************
 
 export type LogLevel =
@@ -46,7 +46,7 @@ export interface SDKOptions {
   maxLogs: number;
   interval: number;
   enableUnloadReport: boolean;
-  autoSync: boolean;
+  autoSync: boolean; // 禁用自动定时校准
   customHeaders: Record<string, string>;
   disabledHosts: string[];
   disabled: boolean;
@@ -58,7 +58,7 @@ export interface LogReporterConfig {
   options: Partial<SDKOptions>;
 }
 
-// 增强 SDKOptions 类型
+// 增强 SDKOptions 类型 (包含 TimeSynchronizer 配置)
 interface EnhancedSDKOptions extends SDKOptions {
   maxRetries: number;
   initialRetryDelay: number;
@@ -73,7 +73,7 @@ interface EnhancedSDKOptions extends SDKOptions {
   shellTarget: string;
   shellResourceType: string | number;
   shellResourceId: string | number;
-  sampleSize: number; // 从 TimeSyncConfig 提升到 SDKOptions
+  sampleSize: number; // 采样次数
 }
 
 // 增强 LogReporterConfig 结构
@@ -105,13 +105,28 @@ interface RetryBatch {
 }
 
 // ******************************************************
-// ***** 2. Constants 定义 *****
+// ***** 2. Constants & Utilities 定义 *****
 // ******************************************************
 
 export const GLOBAL_KEY = "__LogSDK__";
-
-// 简化跨环境定时器类型
 type GlobalTimer = number | NodeJS.Timeout;
+
+const statistics = {
+  /**
+   * 计算数组的中位数。
+   */
+  median(arr: number[]): number {
+    if (!arr.length) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+
+    if (sorted.length % 2 === 0) {
+      return (sorted[middle - 1] + sorted[middle]) / 2;
+    } else {
+      return sorted[middle];
+    }
+  },
+};
 
 // ******************************************************
 // ***** 3. LogBuilder 定义 *****
@@ -195,9 +210,6 @@ export class LogBuilder {
 // ***** 4. TimeSynchronizer 定义 (增强版) *****
 // ******************************************************
 
-/**
- * TimeSynchronizer 配置接口 (使用 SDKOptions 的子集)
- */
 export interface TimeSyncConfig {
   ntpUrl: string;
   autoSync: boolean;
@@ -207,20 +219,6 @@ export interface TimeSyncConfig {
   onSyncSuccess?: () => void;
   onSyncFail?: (error: Error) => void;
 }
-
-const statistics = {
-  median(arr: number[]): number {
-    if (!arr.length) return 0;
-    const sorted = [...arr].sort((a, b) => a - b);
-    const middle = Math.floor(sorted.length / 2);
-
-    if (sorted.length % 2 === 0) {
-      return (sorted[middle - 1] + sorted[middle]) / 2;
-    } else {
-      return sorted[middle];
-    }
-  },
-};
 
 export class TimeSynchronizer {
   private config: TimeSyncConfig;
@@ -291,10 +289,9 @@ export class TimeSynchronizer {
         try {
           const sample = await this._syncTimeSample();
           offsetSamples.push(sample);
-          // 采样间隔 50ms
           await new Promise((resolve) => setTimeout(resolve, 50));
         } catch (e) {
-          console.warn(`TimeSynchronizer: 第 ${i + 1} 次采样失败, 跳过。`);
+          // 忽略单个采样失败
         }
       }
 
@@ -342,6 +339,7 @@ export class TimeSynchronizer {
       this.syncTime();
     }, this.config.syncInterval) as GlobalTimer;
 
+    // 启动时立即同步一次
     this.syncTime();
   }
 
@@ -421,7 +419,7 @@ export class LogReporter {
         maxLogs: 10,
         interval: 1000,
         enableUnloadReport: true,
-        autoSync: true,
+        autoSync: true, // 默认开启自动同步
         separateByUrl: true,
 
         defaultApiUrl: "/api/logs/default",
@@ -432,8 +430,9 @@ export class LogReporter {
         shellResourceType: "frontend",
         shellResourceId: "app-main-01",
 
-        jitterThreshold: 500,
-        syncInterval: 3600000,
+        jitterThreshold: 500, // 漂移阈值 500ms
+        syncInterval: 3600000, // 1小时校准一次
+        sampleSize: 5, // 5次采样
 
         customHeaders: {},
         disabledHosts: defaultDisabledHosts,
@@ -445,7 +444,6 @@ export class LogReporter {
         maxQueueSize: 50000,
 
         minLogLevel: "debug",
-        sampleSize: 5, // 默认采样次数
       } as EnhancedSDKOptions,
     } as EnhancedLogReporterConfig;
   }
@@ -513,7 +511,7 @@ export class LogReporter {
     // 初始化 TimeSynchronizer
     this.timeSync = new TimeSynchronizer({
       ntpUrl: currentNtpUrl,
-      autoSync: this.config.options.autoSync,
+      autoSync: this.config.options.autoSync, // 继承自 SDKOptions
       jitterThreshold: this.config.options.jitterThreshold,
       syncInterval: this.config.options.syncInterval,
       sampleSize: this.config.options.sampleSize,
@@ -712,7 +710,7 @@ export class LogReporter {
     );
   }
 
-  // --- 内部辅助方法 ---
+  // --- 内部辅助方法 (LogReporter) ---
 
   private _normalizeError(logData: Error | Record<string, any> | string): {
     info: string | null;
