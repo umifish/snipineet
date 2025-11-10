@@ -1,6 +1,6 @@
 /**
- * LogSDK.ts - 完整集成文件
- * 包含 LogReporter (v2), LogBuilder, TimeSynchronizer (v2 - 采样和中位数处理), LogTypes 和 Constants。
+ * LogReporter.ts - 完整集成文件
+ * 包含 LogTypes, Constants, LogBuilder, TimeSynchronizer (v2 - 采样和中位数处理), 和 LogReporter (v2)。
  */
 
 // ******************************************************
@@ -16,7 +16,7 @@ export type LogLevel =
   | "monitor";
 
 export interface LogContext {
-  clientId: string;
+  clientId: string | (() => string); // 允许函数或字符串
   userId: string | null;
   serverName: string;
   env: string;
@@ -32,7 +32,10 @@ export interface LogScene {
   [key: string]: any;
 }
 
-export interface LogEntry extends LogContext, Record<string, any> {
+export interface LogEntry
+  extends Omit<LogContext, "clientId">,
+    Record<string, any> {
+  clientId: string; // 运行时必须是 string
   type: string;
   timestamp: number;
   sequence: number;
@@ -46,7 +49,7 @@ export interface SDKOptions {
   maxLogs: number;
   interval: number;
   enableUnloadReport: boolean;
-  autoSync: boolean; // 禁用自动定时校准
+  autoSync: boolean;
   customHeaders: Record<string, string>;
   disabledHosts: string[];
   disabled: boolean;
@@ -105,11 +108,30 @@ interface RetryBatch {
 }
 
 // ******************************************************
-// ***** 2. Constants & Utilities 定义 *****
+// ***** 2. Constants & Utilities & Default Config 定义 *****
 // ******************************************************
 
 export const GLOBAL_KEY = "__LogSDK__";
 type GlobalTimer = number | NodeJS.Timeout;
+
+// --- 辅助函数 ---
+
+const _generateUniqueId = (): string =>
+  Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+const _getEnvironment = (): string => {
+  try {
+    if (
+      typeof import.meta !== "undefined" &&
+      import.meta.env &&
+      import.meta.env.DEV
+    ) {
+      return "development";
+    }
+  } catch (e) {
+    /* 安全跳过 */
+  }
+  return "production";
+};
 
 const statistics = {
   /**
@@ -126,6 +148,58 @@ const statistics = {
       return sorted[middle];
     }
   },
+};
+
+// --- 默认配置 ---
+
+const DEFAULT_DISABLED_HOSTS = ["localhost", "test.", "qa.", "staging."];
+const ENV = _getEnvironment();
+
+const DEFAULT_CONTEXT: LogContext = {
+  clientId: _generateUniqueId, // 默认使用函数，在运行时计算
+  userId: null,
+  serverName: "FrontendApp",
+  env: ENV,
+  pageUrl: typeof window !== "undefined" ? window.location.href : "N/A",
+  userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "N/A",
+};
+
+const DEFAULT_OPTIONS: EnhancedSDKOptions = {
+  // 核心上报配置
+  maxLogs: 10,
+  interval: 1000,
+  enableUnloadReport: true,
+  defaultApiUrl: "/api/logs/default",
+  monitorApiUrl: "/api/logs/monitor",
+  separateByUrl: true,
+
+  // 时钟同步配置
+  autoSync: true, // 默认开启自动同步
+  ntpUrl: "https://api.example.com/time/ntp",
+  jitterThreshold: 500, // 500ms 阈值
+  syncInterval: 3600000, // 1小时校准一次
+  sampleSize: 5, // 5次采样
+
+  // 结构配置
+  shellTarget: "global",
+  shellResourceType: "frontend",
+  shellResourceId: "app-main-01",
+
+  // 队列/重试配置
+  maxRetries: 5,
+  initialRetryDelay: 1000,
+  maxQueueSize: 50000,
+
+  // 过滤/禁用配置
+  minLogLevel: "debug",
+  customHeaders: {},
+  disabledHosts: DEFAULT_DISABLED_HOSTS,
+  disabled: false,
+};
+
+export const DEFAULT_LOG_REPORTER_CONFIG: EnhancedLogReporterConfig = {
+  context: DEFAULT_CONTEXT,
+  options: DEFAULT_OPTIONS,
 };
 
 // ******************************************************
@@ -234,8 +308,12 @@ export class TimeSynchronizer {
       this.config.autoSync = false;
     }
 
+    // 无论 autoSync 是否为 true，都需要在初始化时执行一次 timeSync，否则 this.timeOffset 永远是 0
     if (this.config.autoSync) {
       this._startAutoSync();
+    } else if (this.config.ntpUrl) {
+      // 如果禁用自动同步，也要立即执行一次同步，以校准初始时间
+      this.syncTime();
     }
   }
 
@@ -362,7 +440,7 @@ export class TimeSynchronizer {
 
 export class LogReporter {
   public config: EnhancedLogReporterConfig & {
-    context: LogContext;
+    context: Omit<LogContext, "clientId"> & { clientId: string };
   };
   private logQueue: LogEntry[] = [];
   private sendingQueue: LogEntry[] = [];
@@ -373,11 +451,7 @@ export class LogReporter {
   private timeSync: TimeSynchronizer;
   private isTimeSynced: boolean = false;
 
-  // --- 辅助方法：配置、环境与 ID ---
-
-  private _generateUniqueId(): string {
-    return Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
-  }
+  // --- 内部配置和辅助方法 ---
 
   private _getHostDisabledStatus(hosts: string[]): boolean {
     if (typeof window === "undefined") return false;
@@ -386,79 +460,45 @@ export class LogReporter {
     return hosts.some((key) => host.includes(key));
   }
 
-  private _getEnvironment(): string {
-    try {
-      if (
-        typeof import.meta !== "undefined" &&
-        import.meta.env &&
-        import.meta.env.DEV
-      ) {
-        return "development";
-      }
-    } catch (e) {
-      /* 安全跳过 */
+  private _normalizeError(logData: Error | Record<string, any> | string): {
+    info: string | null;
+    moreInfo: string | null;
+    level: "error";
+  } {
+    if (logData instanceof Error) {
+      return {
+        info: logData.message || "Unknown Error",
+        moreInfo: logData.stack || "No stack trace available",
+        level: "error",
+      };
     }
-    return "production";
-  }
-
-  private _getDefaultConfig(isViteDev: boolean): EnhancedLogReporterConfig {
-    const defaultDisabledHosts = ["localhost", "test.", "qa.", "staging."];
-    const env = this._getEnvironment();
+    if (typeof logData === "string") {
+      return { info: logData, moreInfo: null, level: "error" };
+    }
 
     return {
-      context: {
-        clientId: () => this._generateUniqueId(),
-        userId: null,
-        serverName: "FrontendApp",
-        env: env,
-        pageUrl: typeof window !== "undefined" ? window.location.href : "N/A",
-        userAgent:
-          typeof navigator !== "undefined" ? navigator.userAgent : "N/A",
-      } as LogContext,
-      options: {
-        maxLogs: 10,
-        interval: 1000,
-        enableUnloadReport: true,
-        autoSync: true, // 默认开启自动同步
-        separateByUrl: true,
-
-        defaultApiUrl: "/api/logs/default",
-        monitorApiUrl: "/api/logs/monitor",
-        ntpUrl: "https://api.example.com/time/ntp",
-
-        shellTarget: "global",
-        shellResourceType: "frontend",
-        shellResourceId: "app-main-01",
-
-        jitterThreshold: 500, // 漂移阈值 500ms
-        syncInterval: 3600000, // 1小时校准一次
-        sampleSize: 5, // 5次采样
-
-        customHeaders: {},
-        disabledHosts: defaultDisabledHosts,
-        disabled: false,
-
-        maxRetries: 5,
-        initialRetryDelay: 1000,
-
-        maxQueueSize: 50000,
-
-        minLogLevel: "debug",
-      } as EnhancedSDKOptions,
-    } as EnhancedLogReporterConfig;
+      info: logData.info || logData.message || "Custom Error",
+      moreInfo: JSON.stringify(logData),
+      level: "error",
+    };
   }
 
-  constructor(config: Partial<LogReporterConfig> = {}) {
-    let isViteDev = false;
-    try {
-      if (typeof import.meta !== "undefined" && import.meta.env) {
-        isViteDev = import.meta.env.DEV;
-      }
-    } catch (e) {
-      /* 安全跳过 */
-    }
+  private _getLogLevelValue(level: LogLevel): number {
+    const levels: Record<LogLevel, number> = {
+      debug: 10,
+      info: 20,
+      warn: 30,
+      error: 40,
+      fatal: 50,
+      monitor: 60,
+    };
+    return levels[level] || 0;
+  }
 
-    const defaultConfig = this._getDefaultConfig(isViteDev);
+  // --- 构造函数 ---
+
+  constructor(config: Partial<LogReporterConfig> = {}) {
+    const defaultConfig = DEFAULT_LOG_REPORTER_CONFIG;
     const mergedOptions = Object.assign(
       {},
       defaultConfig.options,
@@ -470,6 +510,7 @@ export class LogReporter {
       config.context
     );
 
+    // 处理 clientId 的函数调用
     let finalClientId: string;
     const rawClientId = mergedContextRaw.clientId;
 
@@ -477,22 +518,25 @@ export class LogReporter {
       try {
         finalClientId = rawClientId();
       } catch (e) {
-        finalClientId = this._generateUniqueId();
+        finalClientId = _generateUniqueId();
       }
     } else {
       finalClientId = rawClientId as string;
     }
 
     const mergedContext = {
-      ...mergedContextRaw,
+      ...(mergedContextRaw as Omit<LogContext, "clientId">),
       clientId: finalClientId,
-    } as LogContext;
+    };
 
     this.config = Object.assign({}, defaultConfig, config, {
-      context: mergedContext as LogContext,
+      context: mergedContext,
       options: mergedOptions as EnhancedSDKOptions,
-    }) as EnhancedLogReporterConfig & { context: LogContext };
+    }) as EnhancedLogReporterConfig & {
+      context: Omit<LogContext, "clientId"> & { clientId: string };
+    };
 
+    // 禁用的优先级判断
     if (!this.config.options.defaultApiUrl) {
       this.config.options.disabled = true;
     }
@@ -502,16 +546,14 @@ export class LogReporter {
         this.config.options.disabledHosts
       );
       this.config.options.disabled = hostCheckDisabled;
-    } else {
-      this.config.options.disabled = config.options.disabled;
-    }
+    } // 否则，使用用户配置的 disabled 值
 
     const currentNtpUrl = this.config.options.ntpUrl || "";
 
     // 初始化 TimeSynchronizer
     this.timeSync = new TimeSynchronizer({
       ntpUrl: currentNtpUrl,
-      autoSync: this.config.options.autoSync, // 继承自 SDKOptions
+      autoSync: this.config.options.autoSync,
       jitterThreshold: this.config.options.jitterThreshold,
       syncInterval: this.config.options.syncInterval,
       sampleSize: this.config.options.sampleSize,
@@ -548,6 +590,7 @@ export class LogReporter {
   }
 
   // --- 公共 API ---
+
   public destroy(): void {
     this.stopIntervalReport();
     this.logQueue = [];
@@ -564,16 +607,18 @@ export class LogReporter {
     this.setContext("env", newEnv);
   }
 
-  public setContext(key: keyof LogContext | string, value: any): void {
-    if (key === "clientId" && typeof value === "function") {
-      try {
-        this.config.context[key] = value();
-      } catch (e) {
-        console.error("LogReporter: setContext clientId function failed.", e);
-      }
-    } else {
-      this.config.context[key] = value;
+  public setContext(
+    key: Exclude<keyof LogContext, "clientId"> | string,
+    value: any
+  ): void {
+    // clientId 只能通过构造函数或初始化函数设置，运行时不建议修改
+    if (key === "clientId") {
+      console.warn(
+        "LogReporter: 运行时不建议修改 clientId，请在构造函数中设置。"
+      );
+      return;
     }
+    this.config.context[key] = value;
   }
 
   public setCustomHeader(key: string, value: string): void {
@@ -622,6 +667,7 @@ export class LogReporter {
     this._log(payload, type, immediate, context, scene);
   }
 
+  // --- 简易 API ---
   public log(
     type: string,
     message: string,
@@ -710,42 +756,7 @@ export class LogReporter {
     );
   }
 
-  // --- 内部辅助方法 (LogReporter) ---
-
-  private _normalizeError(logData: Error | Record<string, any> | string): {
-    info: string | null;
-    moreInfo: string | null;
-    level: "error";
-  } {
-    if (logData instanceof Error) {
-      return {
-        info: logData.message || "Unknown Error",
-        moreInfo: logData.stack || "No stack trace available",
-        level: "error",
-      };
-    }
-    if (typeof logData === "string") {
-      return { info: logData, moreInfo: null, level: "error" };
-    }
-
-    return {
-      info: logData.info || logData.message || "Custom Error",
-      moreInfo: JSON.stringify(logData),
-      level: "error",
-    };
-  }
-
-  private _getLogLevelValue(level: LogLevel): number {
-    const levels: Record<LogLevel, number> = {
-      debug: 10,
-      info: 20,
-      warn: 30,
-      error: 40,
-      fatal: 50,
-      monitor: 60,
-    };
-    return levels[level] || 0;
-  }
+  // --- 核心上报逻辑 ---
 
   private _log(
     payload: Record<string, any>,
@@ -782,7 +793,9 @@ export class LogReporter {
       } as LogScene,
 
       ...this.config.context,
-      ...customContext,
+      ...(customContext as Omit<LogContext, "clientId"> & {
+        [key: string]: any;
+      }), // 合并 customContext，但 clientId 在初始化时已确定
 
       ...payload,
     } as LogEntry;
