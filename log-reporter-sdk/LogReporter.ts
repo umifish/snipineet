@@ -15,7 +15,7 @@ import {
 } from "./LogTypes";
 import { LogBuilder } from "./LogBuilder";
 import { TimeSynchronizer } from "./TimeSynchronizer";
-import { GLOBAL_KEY } from "./Constants";
+import { GLOBAL_KEY } from "./constants";
 
 // 简化跨环境定时器类型：在浏览器中是 number，在 Node.js 中是 NodeJS.Timeout
 type GlobalTimer = number | NodeJS.Timeout;
