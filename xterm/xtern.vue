@@ -2,19 +2,40 @@
   <div class="log-terminal-wrapper">
     <div class="controls">
       <label
-        >Client ID 筛选:
+        >Client ID:
         <input
           v-model="logStore.filterClientId"
           placeholder="Client ID"
           type="text"
       /></label>
       <label
-        >User ID 筛选:
+        >User ID:
         <input
           v-model="logStore.filterUserId"
           placeholder="User ID"
           type="text"
       /></label>
+
+      <label
+        >起始时间:
+        <input
+          v-model="logStore.filterStartTime"
+          placeholder="YYYY-MM-DD HH:MM:SS"
+          type="text"
+          title="支持任何能被 Date() 解析的格式"
+          style="width: 150px"
+        />
+      </label>
+      <label
+        >结束时间:
+        <input
+          v-model="logStore.filterEndTime"
+          placeholder="YYYY-MM-DD HH:MM:SS"
+          type="text"
+          title="支持任何能被 Date() 解析的格式"
+          style="width: 150px"
+        />
+      </label>
 
       <label>聚合模式:</label>
       <select
@@ -63,11 +84,11 @@
       >
       <span
         :class="{
-          'status-connected': logStore.isConnected,
-          'status-disconnected': !logStore.isConnected,
+          'status-connected': logStore.isPolling,
+          'status-disconnected': !logStore.isPolling,
         }"
       >
-        状态: {{ logStore.isConnected ? "已连接" : "已断开" }}
+        轮询状态: {{ logStore.isPolling ? "运行中" : "已停止" }}
       </span>
 
       <span class="status-mode">
@@ -145,13 +166,12 @@ let fitAddon: FitAddon | null = null;
 // Xterm.js 配置优化 (包含滚动条颜色优化)
 const terminalOptions: ITerminalOptions = {
   scrollback: 99999,
-  disableStdin: true,
+  disableStdin: true, // Xterm 仅展示
   cursorBlink: false,
   allowTransparency: true,
   theme: {
     background: "#1e1e1e",
     foreground: "#d4d4d4",
-    // 滚动条颜色优化
     scrollbar: "#555555",
     scrollbarHover: "#777777",
     scrollbarActive: "#aaaaaa",
@@ -164,7 +184,7 @@ onMounted(async () => {
 
   const webglAddon = new WebglAddon();
   term.loadAddon(fitAddon);
-  term.loadAddon(webglAddon); // 加载 WebGL
+  term.loadAddon(webglAddon);
 
   if (terminalRef.value) {
     term.open(terminalRef.value);
@@ -173,16 +193,18 @@ onMounted(async () => {
 
   logStore.setTerminalInstance(term);
 
-  // 监听 Xterm.js 的滚动事件 (上拉加载)
+  // 监听 Xterm.js 的滚动事件 (上拉加载历史数据)
   term.onScroll((firstDisplayedLine: number) => {
     if (firstDisplayedLine === 0 && !logStore.isLoadingHistory) {
       logStore.loadOlderLogs();
     }
   });
 
-  // 初始加载和连接
+  // 初始加载历史日志
   await logStore.loadOlderLogs();
-  logStore.connect("ws://your-log-server.com/terminal-stream");
+
+  // 启动定时器轮询接口
+  logStore.fetchLatestLogs();
 
   // 窗口大小自适应
   const handleResize = () => fitAddon?.fit();
@@ -193,12 +215,14 @@ onBeforeUnmount(() => {
   if (term) {
     term.dispose();
   }
+  logStore.stopPolling(); // 停止轮询
   const handleResize = () => fitAddon?.fit();
   window.removeEventListener("resize", handleResize);
 });
 </script>
 
 <style scoped>
+/* CSS 样式保持不变 */
 .log-terminal-wrapper {
   height: 600px;
   display: flex;
@@ -215,6 +239,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   color: #d4d4d4;
   font-size: 0.9em;
+  flex-wrap: wrap;
 }
 .controls label,
 .controls span {
@@ -314,11 +339,14 @@ onBeforeUnmount(() => {
   background-color: #555;
   padding: 3px 8px;
   font-size: 0.8em;
+  color: white;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
 }
 
 .xterm-container {
   flex-grow: 1;
   width: 100%;
-  /* 确保终端在非聚合模式下占据剩余空间 */
 }
 </style>
