@@ -11,6 +11,7 @@ const XTERM_DISPLAY_LIMIT = 2000; // Xterm 最大显示条数限制
 // 动画相关常量
 const ANIMATION_DURATION_MS = 300; // 动画持续时间
 const MOVE_STEP_SMOOTH = 2000; // 动画目标步长 (切换到下一个/上一个窗口)
+const POST_MOVE_LOCK_MS = 50; // 滚动后锁定时间，防止 Xterm 事件循环
 
 // --- 类型定义 ---
 export type WindowMoveDirection = "OLDER" | "NEWER" | "LATEST" | null;
@@ -21,14 +22,19 @@ export interface LogEntry {
   timestamp: number;
   sequence: number;
   level: "INFO" | "WARN" | "ERROR" | string;
+  userId: string;
+  clientId: string;
 }
 
-// --- 模拟 API 接口 ---
+// --- 模拟 API 接口 (保持不变) ---
 let mockSequenceCounter = 1;
 
 const createMockLog = (timestamp: number, baseId: number): LogEntry => {
   const id = baseId + Math.random() * 100000;
   mockSequenceCounter++;
+  const userId = `U${Math.floor(Math.random() * 5) + 1}`;
+  const clientId = `C${Math.floor(Math.random() * 3) + 1}`;
+
   return {
     id: id,
     message: `Log entry at ${new Date(
@@ -37,6 +43,8 @@ const createMockLog = (timestamp: number, baseId: number): LogEntry => {
     timestamp: timestamp,
     sequence: mockSequenceCounter,
     level: baseId % 15 === 0 ? "ERROR" : baseId % 5 === 0 ? "WARN" : "INFO",
+    userId: userId,
+    clientId: clientId,
   };
 };
 
@@ -44,7 +52,6 @@ const mockFetchLatestLogs = async (
   maxTimestamp: number | null,
   limit: number
 ): Promise<LogEntry[]> => {
-  // 模拟网络延迟
   await new Promise((resolve) => setTimeout(resolve, 100));
   const logs: LogEntry[] = [];
   const baseTimestamp = maxTimestamp || Date.now();
@@ -57,7 +64,7 @@ const mockFetchLatestLogs = async (
   return logs;
 };
 
-// --- 排序函数（按时间戳和序号升序） ---
+// --- 辅助函数 (保持不变) ---
 const primarySort = (a: LogEntry, b: LogEntry): number => {
   if (a.timestamp !== b.timestamp) {
     return a.timestamp - b.timestamp;
@@ -65,7 +72,6 @@ const primarySort = (a: LogEntry, b: LogEntry): number => {
   return a.sequence - b.sequence;
 };
 
-// --- 二分查找插入位置 ---
 const findInsertionIndex = (logs: LogEntry[], newLog: LogEntry): number => {
   let low = 0;
   let high = logs.length;
@@ -80,6 +86,27 @@ const findInsertionIndex = (logs: LogEntry[], newLog: LogEntry): number => {
   return low;
 };
 
+const filterLogs = (
+  logs: LogEntry[],
+  userId: string,
+  clientId: string
+): LogEntry[] => {
+  if (!userId && !clientId) {
+    return logs;
+  }
+
+  return logs.filter((log) => {
+    let match = true;
+    if (userId && log.userId !== userId) {
+      match = false;
+    }
+    if (clientId && log.clientId !== clientId) {
+      match = false;
+    }
+    return match;
+  });
+};
+
 // --- Pinia Store ---
 
 export const useLogTerminalStore = defineStore("logTerminal", () => {
@@ -91,16 +118,20 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
   const logIdSet: Ref<Set<number>> = ref(new Set());
   const maxLogTimestamp: Ref<number | null> = ref(null);
 
-  // 当前 Xterm 显示窗口在 allLogs 中的起始索引
   const scrollLogIndexStart = ref(0);
-
-  // 用于自动滚动模式下的增量渲染
   const latestPolledLogs: Ref<LogEntry[]> = ref([]);
+
+  // 筛选状态
+  const filterUserId = ref("");
+  const filterClientId = ref("");
 
   // 动画状态
   const isAnimating = ref(false);
   const animationTargetStart = ref(0);
   let animationFrameId: number | null = null;
+
+  // 【新增状态】用于防止滚动事件循环
+  const isPostMoveLocked = ref(false);
 
   // 渲染相关缓存
   const lastWindowMoveDirection: Ref<WindowMoveDirection> = ref(null);
@@ -110,8 +141,30 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
 
   // --- Getters ---
 
+  // 【优化】计算 trim 后的筛选值，避免重复计算
+  const trimmedFilterUserId = computed(() => filterUserId.value.trim());
+  const trimmedFilterClientId = computed(() => filterClientId.value.trim());
+
+  const isFilterActive = computed(
+    () => !!trimmedFilterUserId.value || !!trimmedFilterClientId.value
+  );
+
+  /**
+   * 根据筛选条件返回活跃的日志列表 (基于 allLogs)
+   */
+  const activeLogs = computed<LogEntry[]>(() => {
+    return filterLogs(
+      allLogs.value,
+      trimmedFilterUserId.value,
+      trimmedFilterClientId.value
+    );
+  });
+
+  /**
+   * 核心：返回当前已截断的日志列表 (基于 activeLogs)
+   */
   const displayContent = computed<LogEntry[]>(() => {
-    const baseLogs = allLogs.value;
+    const baseLogs = activeLogs.value;
     const totalLogs = baseLogs.length;
 
     let start = scrollLogIndexStart.value;
@@ -128,7 +181,7 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
   });
 
   const isViewingNewest = computed(() => {
-    const baseLogsLength = allLogs.value.length;
+    const baseLogsLength = activeLogs.value.length;
     const maxStart = Math.max(0, baseLogsLength - XTERM_DISPLAY_LIMIT);
     return scrollLogIndexStart.value === maxStart;
   });
@@ -179,20 +232,28 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
     }
 
     if (isAtLatestBeforeInsert) {
-      // 插入新日志后，保持在最新窗口
       forceMoveDisplayWindow("LATEST");
     }
 
+    // 【修复】筛选模式下也应处理符合条件的增量日志
     if (isPolled && isAutoScrolling.value) {
-      latestPolledLogs.value.push(...logsToInsert);
+      const filteredNewLogs = filterLogs(
+        logsToInsert,
+        trimmedFilterUserId.value,
+        trimmedFilterClientId.value
+      );
+
+      if (filteredNewLogs.length > 0) {
+        latestPolledLogs.value.push(...filteredNewLogs);
+      }
     }
   };
 
   /**
-   * 内部非动画版本的窗口移动 (用于 insertLogs 和清空时的即时移动)
+   * 内部非动画版本的窗口移动
    */
   const forceMoveDisplayWindow = (direction: WindowMoveDirection) => {
-    const baseLogsLength = allLogs.value.length;
+    const baseLogsLength = activeLogs.value.length;
     const maxStart = Math.max(0, baseLogsLength - XTERM_DISPLAY_LIMIT);
     let newStart = scrollLogIndexStart.value;
 
@@ -211,20 +272,28 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
   };
 
   /**
-   * 【主要对外暴露的移动函数】开始动画滚动到新的窗口位置
+   * 【主要对外暴露的移动函数】开始动画滚动
    */
   const moveDisplayWindow = (direction: WindowMoveDirection) => {
     if (isAnimating.value) {
       cancelAnimationFrame(animationFrameId!);
     }
 
-    // LATEST 必须是即时的，不能用动画
     if (direction === "LATEST") {
       forceMoveDisplayWindow("LATEST");
       return;
     }
 
-    const baseLogsLength = allLogs.value.length;
+    // 动画切换必须在非筛选模式下进行，否则序列号计算错误
+    if (isFilterActive.value) {
+      console.warn(
+        "Cannot perform smooth scroll animation while filters are active."
+      );
+      forceMoveDisplayWindow(direction); // 切换到非动画版本
+      return;
+    }
+
+    const baseLogsLength = activeLogs.value.length;
     const maxStart = Math.max(0, baseLogsLength - XTERM_DISPLAY_LIMIT);
 
     let targetStart = scrollLogIndexStart.value;
@@ -252,10 +321,18 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
     lastWindowMoveDirection.value = direction;
 
     animateScroll(targetStart, direction);
+
+    // 【修复】动画完成后，短暂锁定 Xterm 滚动条
+    setTimeout(() => {
+      isPostMoveLocked.value = true;
+      setTimeout(() => {
+        isPostMoveLocked.value = false;
+      }, POST_MOVE_LOCK_MS);
+    }, ANIMATION_DURATION_MS);
   };
 
   /**
-   * 内部动画循环函数
+   * 内部动画循环函数 (保持不变)
    */
   const animateScroll = (
     targetStart: number,
@@ -271,7 +348,6 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
       const elapsed = timestamp - startTime;
       const progress = Math.min(elapsed / ANIMATION_DURATION_MS, 1);
 
-      // EaseInOutQuad 缓动函数
       const easedProgress =
         progress < 0.5
           ? 2 * progress * progress
@@ -288,7 +364,6 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
       if (progress < 1) {
         animationFrameId = requestAnimationFrame(step);
       } else {
-        // 动画结束
         scrollLogIndexStart.value = targetStart;
         isAnimating.value = false;
         lastWindowMoveDirection.value = null;
@@ -333,7 +408,6 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
     }
     isPolling.value = false;
 
-    // 停止动画
     if (animationFrameId !== null) {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
@@ -349,13 +423,26 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
     allLogs.value = [];
     logIdSet.value.clear();
     maxLogTimestamp.value = null;
+
     latestPolledLogs.value = [];
     scrollLogIndexStart.value = 0;
-
     previousRenderContent.value = [];
     lastWindowMoveDirection.value = null;
 
-    stopPolling(); // 确保轮询和动画都停止
+    filterUserId.value = "";
+    filterClientId.value = "";
+    isPostMoveLocked.value = false;
+
+    stopPolling();
+  };
+
+  /**
+   * 重置筛选并滚动到最新
+   */
+  const resetFilters = () => {
+    filterUserId.value = "";
+    filterClientId.value = "";
+    forceMoveDisplayWindow("LATEST");
   };
 
   return {
@@ -365,6 +452,7 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
     isPolling,
     isAutoScrolling,
     isAnimating,
+    isPostMoveLocked, // 【新增导出】
 
     scrollLogIndexStart,
     isViewingOldest,
@@ -373,6 +461,12 @@ export const useLogTerminalStore = defineStore("logTerminal", () => {
 
     lastWindowMoveDirection,
     previousRenderContent,
+
+    filterUserId,
+    filterClientId,
+    isFilterActive,
+    activeLogs,
+    resetFilters,
 
     displayContent,
 

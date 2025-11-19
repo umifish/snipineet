@@ -10,6 +10,28 @@
         自动滚动
       </label>
 
+      <div class="filter-group">
+        <input
+          type="text"
+          v-model="logStore.filterUserId"
+          placeholder="筛选 UserId (e.g., U1)"
+          :disabled="logStore.isAnimating"
+        />
+        <input
+          type="text"
+          v-model="logStore.filterClientId"
+          placeholder="筛选 ClientId (e.g., C3)"
+          :disabled="logStore.isAnimating"
+        />
+        <button
+          v-if="logStore.isFilterActive"
+          @click="logStore.resetFilters"
+          class="reset-btn"
+        >
+          重置筛选
+        </button>
+      </div>
+
       <button
         v-if="!logStore.isAutoScrolling && !logStore.isViewingNewest"
         @click="logStore.moveDisplayWindow('LATEST')"
@@ -24,14 +46,14 @@
         :disabled="logStore.isAnimating"
         class="danger-btn"
       >
-        清空所有数据
+        清空所有
       </button>
       <button @click="reRenderTerminal(true)" :disabled="logStore.isAnimating">
-        重新渲染
+        重绘终端
       </button>
 
       <span class="status-log-count">
-        日志总数:
+        总数:
         <span
           :class="{
             'limit-warning': logStore.allLogsLength >= logStore.MAX_LOG_COUNT,
@@ -41,24 +63,22 @@
         </span>
       </span>
       <span
-        :class="{
-          'status-connected': logStore.isPolling,
-          'status-disconnected': !logStore.isPolling,
-        }"
+        v-if="logStore.isFilterActive"
+        style="color: #61afef; font-weight: bold"
+        >[筛选中: {{ logStore.activeLogs.length }} 条]</span
       >
-        轮询状态: {{ logStore.isPolling ? "运行中" : "已停止" }}
-      </span>
       <span v-if="logStore.isAnimating" class="status-loading"
         >正在平滑滚动...</span
       >
 
       <span class="status-scroll-position">
         窗口索引: {{ logStore.scrollLogIndexStart }} /
-        {{ Math.max(0, logStore.allLogsLength - logStore.XTERM_DISPLAY_LIMIT) }}
+        {{
+          Math.max(0, logStore.activeLogs.length - logStore.XTERM_DISPLAY_LIMIT)
+        }}
         <span v-if="logStore.isViewingNewest" style="color: #38b438"
           >(最新)</span
         >
-        <span v-else style="color: yellow">(手动查看中)</span>
       </span>
     </div>
 
@@ -85,7 +105,7 @@ let isFirstRender = true;
 
 // Xterm.js 配置
 const terminalOptions: ITerminalOptions = {
-  scrollback: 0, // 禁用 Xterm 自身的滚动回溯，完全由我们控制窗口
+  scrollback: 0,
   disableStdin: true,
   cursorBlink: false,
   theme: {
@@ -98,7 +118,7 @@ const terminalOptions: ITerminalOptions = {
 };
 
 /**
- * 格式化并写入日志到 Xterm 终端
+ * 格式化并写入日志到 Xterm 终端 (增加了 userId 和 clientId)
  */
 const writeLogToTerminal = (logData: LogEntry) => {
   const t = term;
@@ -110,7 +130,7 @@ const writeLogToTerminal = (logData: LogEntry) => {
   const resetColor = "\x1b[0m";
   const timestamp = new Date(logData.timestamp).toLocaleTimeString();
 
-  const formattedLine = `${levelColor}[${timestamp}|${logData.sequence}] [${level}]: ${logData.message}${resetColor}\r\n`;
+  const formattedLine = `${levelColor}[${timestamp}|${logData.sequence}] [${level}|U:${logData.userId}|C:${logData.clientId}]: ${logData.message}${resetColor}\r\n`;
 
   t.write(formattedLine);
 };
@@ -127,19 +147,20 @@ const reRenderTerminal = (forceFullRender: boolean = false) => {
   const moveDirection = logStore.lastWindowMoveDirection;
 
   // ------------------------------------------
-  // 逻辑 A: 初始渲染或强制全量渲染
+  // 逻辑 A: 初始渲染、强制全量渲染、筛选模式、动画结束
   // ------------------------------------------
   if (
     isFirstRender ||
     forceFullRender ||
     moveDirection === "LATEST" ||
-    !logStore.isAnimating
+    !logStore.isAnimating ||
+    logStore.isFilterActive
   ) {
     t.clear();
 
     const totalDisplayedCount = currentLogs.length;
     t.write(
-      `\r\n\x1b[36m--- Total ${logStore.allLogsLength} logs. Viewing: ${
+      `\r\n\x1b[36m--- Active Logs: ${logStore.activeLogs.length}. Viewing: ${
         logStore.scrollLogIndexStart
       } to ${
         logStore.scrollLogIndexStart + totalDisplayedCount - 1
@@ -156,64 +177,53 @@ const reRenderTerminal = (forceFullRender: boolean = false) => {
   }
 
   // ------------------------------------------
-  // 逻辑 B: 平滑增量滚动（动画过程中）
+  // 逻辑 B: 平滑增量滚动（非筛选模式，动画过程中）
   // ------------------------------------------
   if (
     logStore.isAnimating &&
+    !logStore.isFilterActive &&
     previousLogs.length > 0 &&
     currentLogs.length > 0
   ) {
-    // 如果新旧内容没有序列号变化，则不渲染
+    // 确保本次渲染的内容和上次渲染的内容有差异
     if (currentLogs[0].sequence === previousLogs[0].sequence) return;
 
-    // 计算新进入视窗的行数（基于序列号差异）
+    // 仅在非筛选模式下，使用 sequence 差异计算 linesMoved
     let linesMoved: number;
 
     if (moveDirection === "OLDER") {
       linesMoved = previousLogs[0].sequence - currentLogs[0].sequence;
       if (linesMoved <= 0) return;
 
-      // Xterm 滚动：将现有内容向下滚动 linesMoved 行
       t.scrollLines(linesMoved);
-
-      // 写入新行 (slice(0, linesMoved) 是新进入顶部的 linesMoved 行)
       const newLines = currentLogs.slice(0, linesMoved);
 
-      t.write("\x1b[s"); // 保存光标位置
-      t.write("\x1b[H"); // 移动到第一行
-
+      t.write("\x1b[s");
+      t.write("\x1b[H");
       newLines.forEach(() => {
-        t.write(`\x1b[2K\r`); // 清除当前行
+        t.write(`\x1b[2K\r`);
       });
-
-      t.write("\x1b[H"); // 再次移动到第一行开始写入
+      t.write("\x1b[H");
       newLines.forEach(writeLogToTerminal);
-
-      t.write("\x1b[u"); // 恢复光标位置
+      t.write("\x1b[u");
     } else if (moveDirection === "NEWER") {
       linesMoved =
         currentLogs[currentLogs.length - 1].sequence -
         previousLogs[previousLogs.length - 1].sequence;
       if (linesMoved <= 0) return;
 
-      // Xterm 滚动：将现有内容向上滚动 linesMoved 行
       t.scrollLines(-linesMoved);
-
-      // 写入新行 (slice(-linesMoved) 是新进入底部的 linesMoved 行)
       const newLines = currentLogs.slice(-linesMoved);
-
-      t.write("\x1b[s"); // 保存光标位置
-
+      t.write("\x1b[s");
       newLines.forEach(writeLogToTerminal);
-
-      t.write("\x1b[u"); // 恢复光标位置
+      t.write("\x1b[u");
     }
 
     return;
   }
 
   // ------------------------------------------
-  // 逻辑 C: 轮询增量
+  // 逻辑 C: 轮询增量 (仅在自动滚动且最新窗口时)
   // ------------------------------------------
   if (
     logStore.isAutoScrolling &&
@@ -225,19 +235,15 @@ const reRenderTerminal = (forceFullRender: boolean = false) => {
   }
 };
 
-// 清除 Store 和 Xterm 的所有数据和显示
+// 清除 Store 和 Xterm 的所有数据和缓存
 const clearAllData = () => {
-  // 1. 清除 Store 中的所有数据和缓存，并停止轮询/动画
   logStore.clearTerminal();
 
   if (term) {
-    // 2. 清除 Xterm 显示
     term.clear();
     term.write(
       "\x1b[31m--- ALL Data Cleared. Restarting Polling... ---\x1b[0m\r\n"
     );
-
-    // 3. 重新启动轮询和初始加载
     logStore.fetchLatestLogs();
   }
 };
@@ -255,16 +261,17 @@ onMounted(async () => {
 
   // 监听 Xterm.js 的滚动事件
   term!.onScroll((firstDisplayedLine: number) => {
-    // 如果正在动画中，忽略用户滚动
-    if (logStore.isAnimating) return;
+    // 【修复】增加 PostMoveLocked 检查
+    if (logStore.isAnimating || logStore.isPostMoveLocked) return;
 
-    // 1. 滚动到顶部 (firstDisplayedLine 接近 0)，并且当前窗口不是最旧的
+    const totalLines = term!.buffer.active.length;
+
+    // 1. 向上滚动
     if (firstDisplayedLine < 5 && !logStore.isViewingOldest) {
       logStore.moveDisplayWindow("OLDER");
     }
 
-    // 2. 滚动到底部 (firstDisplayedLine + rows 接近 totalLines)，并且当前窗口不是最新的
-    const totalLines = term!.buffer.active.length;
+    // 2. 向下滚动
     if (
       firstDisplayedLine + term!.rows > totalLines - 5 &&
       !logStore.isViewingNewest
@@ -272,7 +279,7 @@ onMounted(async () => {
       logStore.moveDisplayWindow("NEWER");
     }
 
-    // 3. 用户手动滚动到底部时，如果是非自动模式，则确保窗口处于最新
+    // 3. 非自动滚动模式下，用户手动滚到底部，锁定最新
     if (
       !logStore.isAutoScrolling &&
       firstDisplayedLine + term!.rows === totalLines
@@ -285,13 +292,12 @@ onMounted(async () => {
   const handleResize = () => fitAddon?.fit();
   window.addEventListener("resize", handleResize);
 
-  // 1. 启动时的初始化和轮询
   await logStore.fetchLatestLogs();
   reRenderTerminal(true);
 
   // 2. 监听 Store 的变化并触发渲染
 
-  // 监听 scrollLogIndexStart 变化，触发平滑滚动
+  // 监听 scrollLogIndexStart 变化，触发平滑滚动（逻辑 B）
   watch(
     logStore.scrollLogIndexStart,
     () => {
@@ -300,19 +306,21 @@ onMounted(async () => {
     { deep: false }
   );
 
-  // 监听 allLogsLength 和 isAnimating 变化
+  // 监听筛选状态和日志总数变化，触发全量重绘
   watch(
-    [logStore.allLogsLength, logStore.isAnimating],
+    [logStore.isFilterActive, logStore.allLogsLength],
     (newValues, oldValues) => {
-      // 动画结束时 (isAnimating: true -> false)，强制全量重绘
-      if (oldValues[1] === true && newValues[1] === false) {
+      const isFilterChange = newValues[0] !== oldValues[0];
+
+      if (isFilterChange) {
+        // 筛选变化时，强制全量重绘
         reRenderTerminal(true);
         return;
       }
 
-      // 当日志数量突变时 (如截断)，也强制全量重绘
+      // 检查日志总数是否发生大变化（截断）
       if (
-        Math.abs(newValues[0] - oldValues[0]) > logStore.XTERM_DISPLAY_LIMIT
+        Math.abs(newValues[1] - oldValues[1]) > logStore.XTERM_DISPLAY_LIMIT
       ) {
         reRenderTerminal(true);
       }
@@ -320,7 +328,14 @@ onMounted(async () => {
     { deep: false }
   );
 
-  // 监听增量日志的变化
+  // 监听 isAnimating 变化 (动画结束时强制全量重绘)
+  watch(logStore.isAnimating, (isAnimating, wasAnimating) => {
+    if (wasAnimating && !isAnimating) {
+      reRenderTerminal(true);
+    }
+  });
+
+  // 监听增量日志的变化 (逻辑 C)
   watch(
     logStore.latestPolledLogs,
     () => {
@@ -376,6 +391,23 @@ onBeforeUnmount(() => {
 .controls input[type="checkbox"] {
   margin: 0;
 }
+/* 筛选样式 */
+.filter-group {
+  display: flex;
+  gap: 5px;
+}
+.filter-group input {
+  padding: 5px 8px;
+  border: 1px solid #444;
+  background-color: #3c3c3c;
+  color: #d4d4d4;
+  border-radius: 3px;
+  width: 120px;
+}
+.filter-group .reset-btn {
+  background-color: #f7a738;
+}
+/* 按钮样式 */
 .controls button {
   background-color: #007acc;
   color: white;
@@ -405,14 +437,6 @@ onBeforeUnmount(() => {
   color: #ff5555;
   font-weight: bold;
 }
-.status-connected {
-  color: #38b438;
-  font-weight: bold;
-}
-.status-disconnected {
-  color: #ff5555;
-  font-weight: bold;
-}
 .status-loading {
   color: #ffcc00;
   font-weight: bold;
@@ -427,7 +451,6 @@ onBeforeUnmount(() => {
     opacity: 0.5;
   }
 }
-
 .status-scroll-position {
   color: #9cdcfe;
   font-size: 0.9em;
