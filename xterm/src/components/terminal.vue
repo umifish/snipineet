@@ -73,6 +73,14 @@
         <span class="time-label">最新</span>
       </div>
   
+      <div class="column-header">
+          <span class="col-timestamp">Timestamp</span>
+          <span class="col-service">Service Name</span>
+          <span class="col-user">User</span>
+          <span class="col-level">Level</span>
+          <span class="col-message">Message</span>
+      </div>
+  
       <div class="term-box">
         <div ref="terminalRef" class="xterm-container"></div>
         
@@ -101,7 +109,7 @@
   let wheelListener: ((e: WheelEvent) => void) | null = null; 
   
   // === 常量 ===
-  const TERMINAL_SIZE = 100;
+  const TERMINAL_SIZE = 2000;
   const CURRENT_USER = 'admin'; 
   const SCROLL_THRESHOLD = 3; 
   const LOG_TERMINAL_CONFIG = {
@@ -187,20 +195,7 @@
     renderWindow();
   };
   
-  const writeHeader = () => {
-    if (!term) return;
-    const separator = '-'.repeat(term.cols); 
-  
-    term.writeln(`\x1b[90m${separator}\x1b[0m`);
-    term.writeln(
-      '\x1b[1;37mTimestamp   \x1b[0m ' + 
-      '\x1b[1;35mService Name  \x1b[0m ' + 
-      '\x1b[1;36mUser          \x1b[0m ' + 
-      '\x1b[1;37mLevel   \x1b[0m ' + 
-      'Message'
-    );
-    term.writeln(`\x1b[90m${separator}\x1b[0m`);
-  };
+  // 🌟 writeHeader 函数已被移除，由外部 HTML 头部替代
   
   
   // === 渲染/锚定逻辑 ===
@@ -210,7 +205,11 @@
     const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
   
     term.clear();
-    writeHeader();
+    
+    // 在终端内容顶部添加分隔线，与外部头部视觉连接
+    const separator = '-'.repeat(term.cols);
+    term.writeln(`\x1b[90m${separator}\x1b[0m`);
+  
     logsToRender.forEach(item => term?.writeln(item.formattedMsg));
   
     if (isLiveMode.value && autoScroll.value) {
@@ -227,14 +226,12 @@
   
   // === 交互处理 - 过滤器 ===
   const handleFilterToggle = () => {
-      // 切换 store 中的筛选状态
       if (isFiltered.value) {
           store.setUserIdFilter(null);
       } else {
           store.setUserIdFilter(CURRENT_USER);
       }
-      // ❗ 修复重复头部 Bug：移除直接调用 returnToLiveMode()
-      // 绘图和重置操作将由 watch(store.userIdFilter) 侦听器处理。
+      // 依赖 watch 触发重绘
   };
   
   
@@ -283,9 +280,9 @@
   };
   
   
-  // 当 Store 中的筛选状态变化时，强制重置视图位置
+  // 当 Store 中的筛选状态变化时，强制重置视图位置 (修复重复头部 Bug)
   watch(() => store.userIdFilter, () => {
-      returnToLiveMode(); // ✅ 保留：单一触发重绘的来源
+      returnToLiveMode(); 
   });
   
   watch(autoScroll, (newValue) => {
@@ -346,6 +343,33 @@
   </script>
   
   <style scoped>
+  /* 🌟 外部头部样式：使用 ch 单位保证对齐 */
+  .column-header {
+      display: flex;
+      background-color: #1e1e1e; 
+      border-top: 1px solid #333; 
+      font-family: 'Menlo, Monaco, monospace';
+      font-size: 13px;
+      line-height: 1.5; 
+      color: #909090;
+      white-space: nowrap;
+      padding: 0 8px 0 8px; 
+      user-select: none;
+      font-weight: bold;
+  }
+  
+  .column-header > span {
+      display: inline-block;
+      padding-right: 1ch; 
+  }
+  
+  /* 匹配 logStore.ts 中 padEnd(10), padEnd(12), padEnd(12), padEnd(6) 的宽度 */
+  .col-timestamp { min-width: 10ch; } 
+  .col-service { min-width: 12ch; color: #c586c0; } 
+  .col-user { min-width: 12ch; color: #4ec9b0; } 
+  .col-level { min-width: 6ch; } 
+  .col-message { flex-grow: 1; color: #d4d4d4; padding-left: 1ch; } 
+  
   /* Terminal & Layout Styles */
   .terminal-wrapper { display: flex; flex-direction: column; width: 100%; height: 600px; background-color: #1e1e1e; border-radius: 8px; overflow: hidden; border: 1px solid #333; }
   .header { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background-color: #252526; border-bottom: 1px solid #333; user-select: none; color: #ccc;}
@@ -390,7 +414,7 @@
   .btn-load-history:disabled { opacity: 0.6; cursor: not-allowed; }
   
   /* Terminal Box */
-  .term-box { flex: 1; position: relative; overflow: hidden; padding: 4px 0 0 8px; }
+  .term-box { flex: 1; position: relative; overflow: hidden; padding: 0 0 0 8px; } /* 移除顶部 padding，贴合头部 */
   .xterm-container { width: 100%; height: 100%; }
   
   /* Resume Button (Time Machine) */
