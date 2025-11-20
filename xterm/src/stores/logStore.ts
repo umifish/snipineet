@@ -9,7 +9,7 @@ export interface LogItem {
     userId: string;
     level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
     message: string;
-    formattedMsg: string; // 包含 ANSI 颜色的格式化字符串
+    formattedMsg: string; 
 }
 
 // === 模拟 API 调用 ===
@@ -17,20 +17,17 @@ export interface LogItem {
 function formatLogMessage(timestamp: number, serviceName: string, userId: string, level: string, message: string): string {
     const timeStr = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false });
     
-    // ANSI 颜色代码定义
     const colors = {
         INFO: '\x1b[32m',    
         WARN: '\x1b[33m',    
         ERROR: '\x1b[31m',   
         DEBUG: '\x1b[36m',   
         RESET: '\x1b[0m',
-        GRAY: '\x1b[90m',
-        // BOLD: '\x1b[1m' // 头部已分离，不再需要 BOLD 效果
+        GRAY: '\x1b[90m', 
     };
 
     const levelColor = colors[level as keyof typeof colors] || colors.RESET;
 
-    // 使用更窄的填充宽度 (10, 12, 12, 6) 提高终端的兼容性
     return `${colors.GRAY}${timeStr.padEnd(10)}\x1b[0m ` +
            `\x1b[35m${serviceName.padEnd(12)}\x1b[0m ` + 
            `\x1b[36m${userId.padEnd(12)}\x1b[0m ` +      
@@ -74,47 +71,64 @@ const mockLogs = (startId: number, count: number): LogItem[] => {
     return logs;
 };
 
-// 初始加载历史日志
-const INITIAL_LOG_COUNT = 1000;
-const INITIAL_LOG_OFFSET = 10000; // 从 10000 号日志开始模拟
+const INITIAL_LOG_COUNT = 5000; 
+const INITIAL_LOG_OFFSET = 10000; 
+// 定义模拟历史的绝对起点，用于 API 终止判断
+const TRUE_START_ID = 1; 
 
-let currentLogId = INITIAL_LOG_OFFSET + INITIAL_LOG_COUNT; // 下一个新日志的 ID
-
-// 模拟获取历史日志
 const mockFetchOlderLogs = (beforeId: number, count: number): LogItem[] => {
-    if (beforeId <= 1) return []; 
-    const startId = Math.max(1, beforeId - count);
+    
+    // 场景 1: 缓存已清除 (beforeId=0)，加载初始数据
+    if (beforeId === 0) {
+        return mockLogs(INITIAL_LOG_OFFSET, INITIAL_LOG_COUNT);
+    }
+    
+    // 场景 2: 已到达绝对起点，返回空数组（不再依赖 ID 值是否为 1）
+    if (beforeId <= TRUE_START_ID) {
+        return []; 
+    }
+    
+    // 场景 3: 正常加载
+    const startId = Math.max(TRUE_START_ID, beforeId - count);
     const numToFetch = beforeId - startId;
     return mockLogs(startId, numToFetch);
 };
 
-// 模拟获取新日志
 const mockPullNewLogs = (lastId: number): LogItem[] => {
-    const newLogsCount = Math.floor(Math.random() * 5) + 5; // 每次获取 5-9 条新日志
+    const newLogsCount = Math.floor(Math.random() * 5) + 5; 
     if (newLogsCount === 0) return [];
     
     const logs = mockLogs(lastId + 1, newLogsCount);
-    currentLogId += newLogsCount;
     return logs;
 };
 
 // === Pinia Store ===
 export const useLogStore = defineStore('log', () => {
-    // 原始日志数据 (有序)
+    
     const allLogs = ref<LogItem[]>(mockLogs(INITIAL_LOG_OFFSET, INITIAL_LOG_COUNT));
     
     // 筛选条件
     const userIdFilter = ref<string | null>(null);
-
+    const levelFilter = ref<string | null>(null); 
+    
     // 状态
     const isFetchingHistory = ref(false);
+    // 标记是否已通过接口查询确认历史数据已全部加载
+    const historyExhausted = ref(false); 
 
     // 计算属性: 过滤后的日志
     const filteredLogs = computed(() => {
-        if (!userIdFilter.value) {
-            return allLogs.value;
+        let logs = allLogs.value;
+
+        if (userIdFilter.value) {
+            logs = logs.filter(log => log.userId === userIdFilter.value);
         }
-        return allLogs.value.filter(log => log.userId === userIdFilter.value);
+
+        if (levelFilter.value) {
+            logs = logs.filter(log => log.level === levelFilter.value);
+        }
+        
+        return logs;
     });
 
     // 计算属性: 统计信息
@@ -122,13 +136,15 @@ export const useLogStore = defineStore('log', () => {
     const filteredCount = computed(() => filteredLogs.value.length);
     const latestLogId = computed(() => allLogs.value.length > 0 ? allLogs.value[allLogs.value.length - 1].id : 0);
     const earliestLogId = computed(() => allLogs.value.length > 0 ? allLogs.value[0].id : 0);
-
-    // 检查是否有更旧的历史可以加载
-    const hasMoreHistory = computed(() => earliestLogId.value > 1);
-
-    // 距最新日志的差距 (用于历史回溯模式)
-    const gapToLatestLog = computed(() => currentLogId - latestLogId.value);
-
+    
+    const hasMoreHistory = computed(() => {
+        // 缓存为空时，始终允许加载初始数据
+        if (allLogs.value.length === 0) {
+            return true; 
+        }
+        // 只有当接口未明确返回历史耗尽时，才允许继续加载
+        return !historyExhausted.value;
+    });
 
     // --- Actions ---
 
@@ -136,19 +152,16 @@ export const useLogStore = defineStore('log', () => {
         const logs = filteredLogs.value;
         const total = logs.length;
         
-        // 确保 start 不小于 0 且不超过最大索引
         const startIndex = Math.max(0, Math.min(start, total - 1));
         
-        // slice(start, end)
         return logs.slice(startIndex, startIndex + size);
     };
 
     const pullAndProcessLogs = async (): Promise<LogItem[]> => {
         const newLogs = mockPullNewLogs(latestLogId.value);
         if (newLogs.length > 0) {
-            // 合并新日志，保持顺序
             allLogs.value.push(...newLogs);
-            // 保持缓存大小 (例如，最多 20000 条)
+            // 限制缓存大小
             if (allLogs.value.length > 20000) {
                 allLogs.value = allLogs.value.slice(allLogs.value.length - 20000);
             }
@@ -157,32 +170,41 @@ export const useLogStore = defineStore('log', () => {
     };
 
     const fetchOlderLogs = async (): Promise<number> => {
-        if (!hasMoreHistory.value) return 0;
+        if (isFetchingHistory.value || (historyExhausted.value && allLogs.value.length > 0)) return 0;
 
         isFetchingHistory.value = true;
-        
-        // 模拟网络延迟
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        const olderLogs = mockFetchOlderLogs(earliestLogId.value, 1000);
+        const beforeId = earliestLogId.value;
+        const olderLogs = mockFetchOlderLogs(beforeId, 1000);
         isFetchingHistory.value = false;
 
         if (olderLogs.length > 0) {
-            // 将旧日志放在数组头部
             allLogs.value.unshift(...olderLogs);
+            historyExhausted.value = false; 
             return olderLogs.length;
+        } else {
+            // 如果接口返回 0 条日志，且这不是初始加载尝试 (beforeId > 0)，则确认历史耗尽。
+            if (beforeId > 0) {
+                historyExhausted.value = true;
+            }
+            return 0;
         }
-        return 0;
     };
 
     const setUserIdFilter = (userId: string | null) => {
         userIdFilter.value = userId;
     };
+    
+    const setLevelFilter = (level: string | null) => {
+        levelFilter.value = level;
+    };
 
     const clearAllLogs = () => {
         allLogs.value = [];
-        // 重置 ID，模拟清空缓存
-        currentLogId = INITIAL_LOG_OFFSET;
+        userIdFilter.value = null;
+        levelFilter.value = null;
+        historyExhausted.value = false;
     };
 
     const exportAllLogs = () => {
@@ -206,15 +228,17 @@ export const useLogStore = defineStore('log', () => {
         allLogs,
         filteredLogs,
         userIdFilter,
+        levelFilter,
         isFetchingHistory,
+        historyExhausted, 
         totalCount,
         filteredCount,
         hasMoreHistory,
-        gapToLatestLog,
         getLogSlice,
         pullAndProcessLogs,
         fetchOlderLogs,
         setUserIdFilter,
+        setLevelFilter,
         clearAllLogs,
         exportAllLogs
     };
