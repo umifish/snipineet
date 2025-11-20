@@ -63,6 +63,7 @@ function mockFetchLogs(isPolling = true): { logs: LogItem[], absoluteTotalCount:
     
     newLogs.sort((a, b) => a.timestamp - b.timestamp);
 
+    // 假设后端总共有 20000 条日志，用于计算差距
     const absoluteTotalCount = 20000; 
     return { logs: newLogs, absoluteTotalCount };
 }
@@ -87,6 +88,7 @@ function mockFetchOlderLogs(beforeTimestamp: number): { logs: LogItem[], hasMore
         newLogs.push({ id, timestamp, userId, serviceName, level, message, formattedMsg: formatLogMessage(timestamp, serviceName, userId, level, message) });
     }
 
+    // 假设当 beforeTimestamp 足够小（例如小于某个阈值）时，就没有更多历史了
     const hasMore = beforeTimestamp > (Date.now() - 6000000); 
 
     newLogs.sort((a, b) => a.timestamp - b.timestamp);
@@ -96,73 +98,140 @@ function mockFetchOlderLogs(beforeTimestamp: number): { logs: LogItem[], hasMore
 
 
 // --- Pinia Store 定义 ---
-export const useLogStore = defineStore('logStore', () => {
+export const useLogStore = defineStore('logStorexxxx', () => {
+    // 使用 Map 进行存储
     const logsMap = ref(new Map<string, LogItem>());
+    
+    // 缓存大小限制
     const TERMINAL_SIZE = 2000;
 
-    // --- 状态 ---
+    // --- 新增状态用于历史加载和绝对计数 ---
     const isFetchingHistory = ref(false); 
     const hasMoreHistory = ref(true); 
-    const absoluteTotalCount = ref(0); 
-    const userIdFilter = ref<string | null>(null); // 活跃的用户筛选 ID
-    
-    // --- 计算属性 (基于原始缓存) ---
-    const totalCount = computed(() => logsMap.value.size); // 未过滤的缓存总数
+    const absoluteTotalCount = ref(0); // 跟踪后端总日志量
+    // ----------------------------
+
+    // 计算属性：总日志条数 (当前缓存大小)
+    const totalCount = computed(() => logsMap.value.size);
+
+    // 计算属性：返回按时间排序的日志数组（用于渲染）
     const sortedLogs = computed(() => {
         const logArray = Array.from(logsMap.value.values());
         logArray.sort((a, b) => a.timestamp - b.timestamp);
         return logArray;
     });
+
+    // 计算属性：获取当前缓存中最旧日志的时间戳
     const oldestLogTimestamp = computed(() => {
         const logs = sortedLogs.value;
         return logs.length > 0 ? logs[0].timestamp : Date.now();
     });
+    
+    // 新增计算属性：缓存与最新日志的差距
     const gapToLatestLog = computed(() => {
         return Math.max(0, absoluteTotalCount.value - totalCount.value);
     });
-
-    // --- 计算属性 (基于过滤) ---
-    const filteredLogs = computed(() => {
-        if (!userIdFilter.value) {
-            return sortedLogs.value;
-        }
-        // 关键：在 store 中提前执行过滤
-        return sortedLogs.value.filter(log => log.userId === userIdFilter.value);
-    });
-    const filteredCount = computed(() => filteredLogs.value.length); // 过滤后的日志总数
-
-    // --- 方法 (与过滤逻辑相关) ---
     
     /**
-     * 【核心】方向性缓存清除
+     * 【核心】方向性缓存清除：根据锚定方向，删除另一端的日志。
+     * @param anchorDirection 'newest' (保留最新，删除最早) 或 'oldest' (保留最早，删除最新)
      */
     const purgeCache = (anchorDirection: 'newest' | 'oldest') => {
         if (logsMap.value.size <= TERMINAL_SIZE) {
             return;
         }
-        
-        const logsArray = sortedLogs.value; 
+
+        const logsArray = sortedLogs.value;
         const excess = logsMap.value.size - TERMINAL_SIZE;
 
         if (excess <= 0) return;
 
         if (anchorDirection === 'oldest') {
+            // Requirement 1: 锚定旧数据 -> 删除最新的日志
+            // logsArray.slice(logsMap.value.size - excess) 得到要删除的最新那部分日志
             const keysToDelete = logsArray.slice(logsMap.value.size - excess).map(log => log.id);
             keysToDelete.forEach(key => logsMap.value.delete(key));
             console.warn(`[Purge] 锚定旧数据：已删除 ${excess} 条最新日志。`);
+
         } else if (anchorDirection === 'newest') {
+            // Requirement 2: 锚定新数据 -> 删除最早的日志
+            // logsArray.slice(0, excess) 得到要删除的最早那部分日志
             const keysToDelete = logsArray.slice(0, excess).map(log => log.id);
             keysToDelete.forEach(key => logsMap.value.delete(key));
             console.warn(`[Purge] 锚定新数据：已删除 ${excess} 条最旧日志。`);
         }
     };
 
+
+    /**
+     * 调用历史 API 加载更旧的日志 (触发锚定旧数据)
+     */
+    const fetchOlderLogs = async (): Promise<number> => {
+        if (isFetchingHistory.value || !hasMoreHistory.value) {
+            return 0;
+        }
+
+        isFetchingHistory.value = true;
+        
+        const cursorTimestamp = oldestLogTimestamp.value;
+        await new Promise(resolve => setTimeout(resolve, 500)); 
+        const { logs: newOlderLogs, hasMore } = mockFetchOlderLogs(cursorTimestamp);
+        
+        let logsAddedCount = 0;
+
+        // 1. 合并新旧数据
+        for (const log of newOlderLogs) {
+            if (!logsMap.value.has(log.id)) {
+                logsMap.value.set(log.id, log);
+                logsAddedCount++;
+            }
+        }
+        
+        // 2. 触发：锚定旧数据（保留旧日志，删除最新的日志）
+        purgeCache('oldest'); 
+        
+        // 3. 更新状态
+        isFetchingHistory.value = false;
+        hasMoreHistory.value = hasMore;
+        
+        return logsAddedCount;
+    };
+
+
+    /**
+     * 轮询拉取最新日志 (触发锚定新数据)
+     */
+    const pullAndProcessLogs = async (): Promise<LogItem[]> => {
+        const { logs: newLogs, absoluteTotalCount: absoluteCount } = mockFetchLogs();
+        const addedItems: LogItem[] = [];
+
+        // 1. 更新绝对最新计数
+        absoluteTotalCount.value = absoluteCount;
+        
+        // 2. 合并新日志 (包含去重)
+        for (const log of newLogs) {
+            if (!logsMap.value.has(log.id)) {
+                logsMap.value.set(log.id, log);
+                addedItems.push(log);
+            }
+        }
+
+        // 3. 触发：锚定新数据（保留最新日志，删除最早的日志）
+        purgeCache('newest'); 
+
+        return addedItems;
+    };
+
+
     /**
      * 获取指定范围的日志切片
-     * 注意：现在直接从 filteredLogs 中切片，不再需要传入 userIdFilter
      */
-    const getLogSlice = (start: number, length: number): LogItem[] => {
-        const logs = filteredLogs.value; // 从过滤后的数组中获取
+    const getLogSlice = (start: number, length: number, userIdFilter: string | null): LogItem[] => {
+        let logs = sortedLogs.value;
+        
+        if (userIdFilter) {
+            logs = logs.filter(log => log.userId === userIdFilter);
+        }
         
         const safeStart = Math.max(0, start);
         const safeEnd = Math.min(logs.length, safeStart + length);
@@ -171,51 +240,13 @@ export const useLogStore = defineStore('logStore', () => {
     };
 
     /**
-     * 设置用户过滤器
-     */
-    const setUserIdFilter = (userId: string | null) => {
-        userIdFilter.value = userId;
-    };
-
-
-    // --- 轮询和历史加载逻辑 ---
-    const fetchOlderLogs = async (): Promise<number> => {
-        if (isFetchingHistory.value || !hasMoreHistory.value) { return 0; }
-        isFetchingHistory.value = true;
-        const cursorTimestamp = oldestLogTimestamp.value;
-        await new Promise(resolve => setTimeout(resolve, 500)); 
-        const { logs: newOlderLogs, hasMore } = mockFetchOlderLogs(cursorTimestamp);
-        let logsAddedCount = 0;
-        for (const log of newOlderLogs) { if (!logsMap.value.has(log.id)) { logsMap.value.set(log.id, log); logsAddedCount++; } }
-        purgeCache('oldest'); 
-        isFetchingHistory.value = false;
-        hasMoreHistory.value = hasMore;
-        return logsAddedCount;
-    };
-
-    const pullAndProcessLogs = async (): Promise<LogItem[]> => {
-        const { logs: newLogs, absoluteTotalCount: absoluteCount } = mockFetchLogs();
-        const addedItems: LogItem[] = [];
-        absoluteTotalCount.value = absoluteCount;
-        for (const log of newLogs) {
-            if (!logsMap.value.has(log.id)) {
-                logsMap.value.set(log.id, log);
-                addedItems.push(log);
-            }
-        }
-        purgeCache('newest'); 
-        return addedItems;
-    };
-    
-    /**
      * 清除所有日志，并重置所有时间/数据相关的状态
      */
     const clearAllLogs = () => {
         logsMap.value.clear();
         absoluteTotalCount.value = 0;
         hasMoreHistory.value = true;
-        isFetchingHistory.value = false;
-        userIdFilter.value = null; // 重置过滤器
+        isFetchingHistory.value = false; // 确保加载状态被重置
     };
 
     /**
@@ -241,18 +272,19 @@ export const useLogStore = defineStore('logStore', () => {
     };
 
 
-    // --- 返回值 ---
     return {
-        // 原始状态
-        totalCount, sortedLogs, oldestLogTimestamp, absoluteTotalCount, gapToLatestLog,
-        
-        // 过滤状态
-        userIdFilter, filteredLogs, filteredCount,
-        
-        // 交互状态
-        isFetchingHistory, hasMoreHistory,
-        
-        // 方法
-        pullAndProcessLogs, fetchOlderLogs, getLogSlice, clearAllLogs, setUserIdFilter, exportAllLogs
+        logsMap,
+        totalCount,
+        sortedLogs, 
+        isFetchingHistory,
+        hasMoreHistory,
+        absoluteTotalCount,
+        gapToLatestLog, 
+        oldestLogTimestamp,
+        pullAndProcessLogs,
+        fetchOlderLogs,
+        getLogSlice,
+        clearAllLogs,
+        exportAllLogs
     };
 });

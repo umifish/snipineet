@@ -7,7 +7,7 @@
             {{ isPolling ? (isLiveMode ? '🟢 实时监控' : '🟠 历史回溯') : '⏸️ 已暂停' }}
           </span>
           <span class="meta-info">
-            显示: {{ currentRangeText }} / 过滤后总数: {{ store.filteredCount }} / 缓存: {{ store.totalCount }}
+            显示: {{ currentRangeText }} / 缓存: {{ store.totalCount }}
             
             <span v-if="store.gapToLatestLog > 0" class="log-gap-warning">
               (距最新日志差距: {{ store.gapToLatestLog }} 条)
@@ -19,8 +19,9 @@
           <label class="checkbox-item filter-checkbox">
             <input 
               type="checkbox" 
-              :checked="isFiltered" 
-              @change="handleFilterToggle" 
+              v-model="onlyShowMine" 
+              @change="handleFilterChange"
+              :disabled="!isLiveMode && store.totalCount > TERMINAL_SIZE" 
               title="只显示当前用户 (admin) 的日志，切换会重绘终端"
             />
             <span>👤 只看我的 ({{ CURRENT_USER }})</span>
@@ -46,9 +47,10 @@
         </div>
       </div>
   
-      <div class="timeline-bar" v-if="store.filteredCount > 0">
+      <div class="timeline-bar" v-if="store.totalCount > 0">
         <span class="time-label">
           <span v-if="store.isFetchingHistory" class="loading-status">⏳ 正在加载历史...</span>
+          
           <button 
               v-else-if="store.hasMoreHistory && viewportStart === 0" 
               @click="loadMoreHistory" 
@@ -66,8 +68,8 @@
           min="0" 
           :max="maxSliderValue" 
           v-model.number="viewportStart"
-          @input="handleSliderInteraction" 
-          @change="renderWindow"         
+          @input="handleSliderInteraction"
+          @change="renderWindow"
           class="history-slider"
         />
         <span class="time-label">最新</span>
@@ -104,8 +106,10 @@
   const TERMINAL_SIZE = 100;
   const CURRENT_USER = 'admin'; 
   const SCROLL_THRESHOLD = 3; 
+  
+  // === Xterm 最佳配置 ===
   const LOG_TERMINAL_CONFIG = {
-      scrollback: TERMINAL_SIZE,           
+      scrollback: TERMINAL_SIZE, 
       disableStdin: true,           
       convertEol: true,             
       rendererType: 'canvas',
@@ -124,29 +128,27 @@
       }
   };
   
-  
   // === 状态 ===
   const isPolling = ref(false);
   const autoScroll = ref(true); 
+  const onlyShowMine = ref(false); 
   const viewportStart = ref(0);   
   let pollingInterval: number | null = null;
   
   // === 计算属性 ===
-  const maxSliderValue = computed(() => Math.max(0, store.filteredCount - TERMINAL_SIZE));
+  const maxSliderValue = computed(() => Math.max(0, store.totalCount - TERMINAL_SIZE));
   const isLiveMode = computed(() => { return viewportStart.value >= maxSliderValue.value - 1; });
   const missedLogsCount = computed(() => {
     if (isLiveMode.value) return 0; 
     const endOfCurrentView = viewportStart.value + TERMINAL_SIZE;
-    return Math.max(0, store.filteredCount - endOfCurrentView);
+    return Math.max(0, store.totalCount - endOfCurrentView);
   });
   const currentRangeText = computed(() => {
     const start = Math.max(0, viewportStart.value);
-    const end = Math.min(start + TERMINAL_SIZE, store.filteredCount); 
+    const end = Math.min(start + TERMINAL_SIZE, store.totalCount);
     return `${start}-${end}`;
   });
   
-  // 筛选器状态
-  const isFiltered = computed(() => store.userIdFilter === CURRENT_USER);
   
   // === Xterm 初始化 ===
   const initTerminal = () => {
@@ -160,6 +162,7 @@
     term.open(terminalRef.value);
     fitAddon.fit();
     
+    // 逻辑 1: 基于 Xterm.js Scroll 事件的自动滚动状态同步 (用户滚到底部后重新开启)
     term.onScroll(() => {
         if (!term || !isLiveMode.value) return; 
   
@@ -173,6 +176,7 @@
         } 
     });
     
+    // 逻辑 2: 滚轮事件监听，实现灵敏的取消自动滚动
     const terminalDom = term.element;
     
     if (terminalDom) {
@@ -207,7 +211,8 @@
   const renderWindow = () => {
     if (!term) return;
     
-    const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+    const filterUser = onlyShowMine.value ? CURRENT_USER : null;
+    const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE, filterUser);
   
     term.clear();
     writeHeader();
@@ -225,68 +230,62 @@
   };
   
   
-  // === 交互处理 - 过滤器 ===
-  const handleFilterToggle = () => {
-      // 切换 store 中的筛选状态
-      if (isFiltered.value) {
-          store.setUserIdFilter(null);
-      } else {
-          store.setUserIdFilter(CURRENT_USER);
-      }
-      // ❗ 修复重复头部 Bug：移除直接调用 returnToLiveMode()
-      // 绘图和重置操作将由 watch(store.userIdFilter) 侦听器处理。
-  };
-  
-  
   // === 交互处理 - 历史加载逻辑 ===
   const loadMoreHistory = async () => {
       if (!term || store.isFetchingHistory || !store.hasMoreHistory) {
           return;
       }
   
-      const logs = store.filteredLogs;
+      // --- 滚动锚定步骤 1: 记录当前视图的最老日志 ID ---
+      const logs = store.sortedLogs;
       const currentAnchorId = logs.length > 0 && viewportStart.value < logs.length
                               ? logs[viewportStart.value].id 
                               : null;
   
+      // --- 滚动锚定步骤 2: 触发数据加载 ---
       const logsAddedCount = await store.fetchOlderLogs();
   
       if (logsAddedCount > 0) {
-          const newLogs = store.filteredLogs;
-          
+          // --- 滚动锚定步骤 3: 重新计算锚点位置 ---
           if (currentAnchorId) {
+              const newLogs = store.sortedLogs;
               const newAnchorIndex = newLogs.findIndex(log => log.id === currentAnchorId);
   
               if (newAnchorIndex !== -1) {
+                  // 更新 viewportStart 到新的位置，保持视图稳定
                   viewportStart.value = newAnchorIndex;
               } else {
+                   // 锚点丢失 (回退到新加载的起始位置)
                    viewportStart.value = logsAddedCount; 
               }
           } else {
+               // 如果原来没有锚点，直接滚动到新加载的起始位置
                viewportStart.value = logsAddedCount;
           }
   
+          // --- 滚动锚定步骤 4: 重新渲染视图 ---
           renderWindow();
       }
   };
   
   const handleSliderInteraction = () => {
+    // 手动操作滑动条，强制取消自动滚动
     autoScroll.value = false;
+    renderWindow();
   };
   
+  const handleFilterChange = () => {
+    returnToLiveMode(); 
+  };
   
   // === 清除逻辑 ===
   const clearView = () => {
     store.clearAllLogs(); 
     term?.clear();
+    onlyShowMine.value = false;
     returnToLiveMode(); 
   };
   
-  
-  // 当 Store 中的筛选状态变化时，强制重置视图位置
-  watch(() => store.userIdFilter, () => {
-      returnToLiveMode(); // ✅ 保留：单一触发重绘的来源
-  });
   
   watch(autoScroll, (newValue) => {
     if (newValue && isLiveMode.value) {
@@ -304,8 +303,9 @@
       viewportStart.value = maxSliderValue.value; 
   
       if (term && newItems.length > 0) {
+        const filterUser = onlyShowMine.value ? CURRENT_USER : null;
         const itemsToRender = newItems
-          .filter(item => store.userIdFilter ? item.userId === store.userIdFilter : true);
+          .filter(item => filterUser ? item.userId === filterUser : true);
   
         itemsToRender.forEach(item => term?.writeln(item.formattedMsg));
         
@@ -337,6 +337,7 @@
     stopPolling();
     window.removeEventListener('resize', onResize);
     
+    // 关键清理：移除 Xterm.js 上的滚轮事件监听器
     if (term && term.element && wheelListener) {
         term.element.removeEventListener('wheel', wheelListener as EventListener);
     }
