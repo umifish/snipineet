@@ -1,132 +1,151 @@
-// src/stores/logStore.ts
 import { defineStore } from 'pinia';
 
-// 定义日志对象的结构
+// === 1. 类型定义 ===
 export interface LogItem {
-  id: number;
-  userId: string;       // 用于过滤
-  formattedMsg: string; // 用于显示（带颜色的字符串）
+    id: number;
+    timestamp: string;
+    service: string;
+    userId: string;
+    level: 'INFO' | 'WARN' | 'ERROR';
+    message: string;
+    // 经过 ANSI 格式化后的消息，用于 Xterm.js 渲染
+    formattedMsg: string; 
 }
 
-// ANSI 颜色定义 (与 Xterm 主题配置保持一致，以获得最佳视觉效果)
-const COLORS = {
-  RESET: '\x1b[0m',
-  GRAY: '\x1b[90m',    // brightBlack
-  RED: '\x1b[31m',     // red
-  GREEN: '\x1b[32m',   // green
-  YELLOW: '\x1b[33m',  // yellow
-  MAGENTA: '\x1b[35m', // magenta
-  CYAN: '\x1b[36m',    // cyan
-};
+// === 2. 辅助函数：模拟和格式化日志 ===
 
-// 模拟数据池
-const USERS = ['admin', 'system-cron', 'jane_doe', 'guest'];
-const SERVICES = ['Auth-Core', 'Payment-GW', 'Order-DB', 'User-Center'];
+const LOG_LEVELS = [
+    { level: 'INFO', color: '\x1b[32m' }, // Green
+    { level: 'WARN', color: '\x1b[33m' }, // Yellow
+    { level: 'ERROR', color: '\x1b[31m' } // Red
+];
+const SERVICES = ['AuthService', 'DataProcessor', 'LogGenerator', 'WebServer'];
+const USERS = ['admin', 'guest', 'api-user', 'system'];
 
-const mockFetchLogs = async (): Promise<LogItem[]> => {
-  return new Promise((resolve) => {
-    // 模拟每次拉取 1-3 条日志
-    setTimeout(() => {
-      const count = Math.floor(Math.random() * 3) + 1;
-      const newItems: LogItem[] = [];
-      
-      for (let i = 0; i < count; i++) {
-        const now = new Date();
-        const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
-        const id = Date.now() + i + Math.random();
-        
-        const rawService = SERVICES[Math.floor(Math.random() * SERVICES.length)];
-        const rawUser = USERS[Math.floor(Math.random() * USERS.length)];
+/**
+ * 格式化日志为 Xterm.js 可识别的 ANSI 字符串
+ * @param log LogItem 对象
+ * @returns 格式化后的字符串
+ */
+function formatLogForTerminal(log: LogItem): string {
+    const levelData = LOG_LEVELS.find(l => l.level === log.level)!;
+    
+    // 统一列宽
+    const levelStr = `${levelData.color}${log.level.padEnd(7)}\x1b[0m`;
+    const serviceStr = `\x1b[35m${log.service.padEnd(14)}\x1b[0m`;
+    const userStr = `\x1b[36m${log.userId.padEnd(14)}\x1b[0m`;
+    const timeStr = `\x1b[37m${log.timestamp.padEnd(12)}\x1b[0m`;
 
-        // 格式化和对齐
-        const serviceStr = `[${rawService}]`.padEnd(14, ' ');
-        const userStr = `<${rawUser}>`.padEnd(14, ' ');
+    return `${timeStr} ${serviceStr} ${userStr} ${levelStr} ${log.message}`;
+}
 
-        const rand = Math.random();
-        let level = `${COLORS.GREEN}[INFO] ${COLORS.RESET}`;
-        let msgColor = COLORS.RESET;
-        let msgText = `Request processed successfully.`;
+/**
+ * 模拟生成一条新的日志记录
+ * @param id 日志ID
+ * @returns LogItem
+ */
+function generateNewLog(id: number): LogItem {
+    const levelObj = LOG_LEVELS[Math.floor(Math.random() * LOG_LEVELS.length)];
+    const service = SERVICES[Math.floor(Math.random() * SERVICES.length)];
+    const user = USERS[Math.floor(Math.random() * USERS.length)];
+    
+    const now = new Date();
+    const timestamp = now.toLocaleTimeString('en-US', { hour12: false });
+    
+    const message = `Processing request for ${service}. Status code ${Math.floor(Math.random() * 500) + 100}.`;
 
-        if (rand > 0.9) {
-          level = `${COLORS.RED}[ERROR]${COLORS.RESET}`;
-          msgColor = COLORS.RED;
-          msgText = `Database connection failed or resource unavailable.`;
-        } else if (rand > 0.7) {
-          level = `${COLORS.YELLOW}[WARN] ${COLORS.RESET}`;
-          msgText = `Slow query detected (execution time > 500ms).`;
-        }
+    const log: LogItem = {
+        id,
+        timestamp,
+        service,
+        userId: user,
+        level: levelObj.level as LogItem['level'],
+        message,
+        formattedMsg: '' // 稍后设置
+    };
+    log.formattedMsg = formatLogForTerminal(log);
+    return log;
+}
 
-        // 使用 ANSI 颜色进行格式化
-        const formattedMsg = 
-          `${COLORS.GRAY}${timeStr}${COLORS.RESET} ` +
-          `${COLORS.MAGENTA}${serviceStr}${COLORS.RESET} ` +
-          `${COLORS.CYAN}${userStr}${COLORS.RESET} ` +
-          `${level} ` +
-          `${msgColor}${msgText}${COLORS.RESET}`;
 
-        newItems.push({
-          id,
-          userId: rawUser,
-          formattedMsg
-        });
-      }
-      resolve(newItems);
-    }, 200);
-  });
-};
+// === 3. Pinia Store 定义 ===
 
 export const useLogStore = defineStore('log', {
-  state: () => ({
-    fullLogCache: [] as LogItem[], // 存储结构化对象
-  }),
+    state: () => ({
+        logs: [] as LogItem[],
+        totalCount: 0,
+        lastLogId: 0,
+        maxBufferSize: 50000, // 最大日志缓存量
+    }),
+    
+    actions: {
+        /**
+         * @action 1: 模拟从后端拉取新日志并处理
+         * @returns 新增的日志数组
+         */
+        async pullAndProcessLogs(): Promise<LogItem[]> {
+            // 模拟每次拉取 5-30 条新日志
+            const count = Math.floor(Math.random() * 21) + 5;
+            const newLogs: LogItem[] = [];
+            
+            for (let i = 0; i < count; i++) {
+                this.lastLogId++;
+                newLogs.push(generateNewLog(this.lastLogId));
+            }
 
-  getters: {
-    totalCount: (state) => state.fullLogCache.length,
-  },
+            // 添加到日志数组，并强制保持最大缓存限制
+            this.logs.push(...newLogs);
+            
+            if (this.logs.length > this.maxBufferSize) {
+                // 移除最旧的日志
+                this.logs.splice(0, this.logs.length - this.maxBufferSize);
+            }
+            
+            this.totalCount = this.logs.length;
+            
+            return newLogs;
+        },
 
-  actions: {
-    async pullAndProcessLogs(): Promise<LogItem[]> {
-      const newItems = await mockFetchLogs();
-      if (newItems.length === 0) return [];
+        /**
+         * @action 2: 获取日志数据的切片 (用于终端渲染)
+         * @param start 起始索引
+         * @param length 长度
+         * @param filterUser 可选的用户ID过滤
+         * @returns LogItem[]
+         */
+        getLogSlice(start: number, length: number, filterUser: string | null): LogItem[] {
+            const effectiveStart = Math.max(0, start);
+            const effectiveEnd = effectiveStart + length;
 
-      this.fullLogCache.push(...newItems);
+            // 注意：这里基于原始数组进行切片
+            const slicedLogs = this.logs.slice(effectiveStart, effectiveEnd);
 
-      // 维护 10000 条上限（移除最旧的）
-      const MAX_CACHE = 10000;
-      if (this.fullLogCache.length > MAX_CACHE) {
-        // 移除最旧的部分
-        this.fullLogCache = this.fullLogCache.slice(this.fullLogCache.length - MAX_CACHE);
-      }
+            if (filterUser) {
+                return slicedLogs.filter(log => log.userId === filterUser);
+            }
+            return slicedLogs;
+        },
 
-      return newItems;
-    },
+        /**
+         * @action 3: 清除所有日志数据 (修复 LogTerminal.vue 中的 bug)
+         */
+        clearAllLogs() {
+            this.logs = [];
+            this.totalCount = 0;
+            this.lastLogId = 0;
+            console.log('Log Store Cleared: All historical data removed.');
+        },
 
-    /**
-     * 获取指定窗口的日志切片，可选择是否过滤
-     */
-    getLogSlice(startIndex: number, size: number, filterUserId: string | null): LogItem[] {
-      const start = Math.max(0, startIndex);
-      const end = Math.min(start + size, this.fullLogCache.length);
-      
-      const slice = this.fullLogCache.slice(start, end);
-      
-      if (filterUserId) {
-        return slice.filter(item => item.userId === filterUserId);
-      }
-      return slice;
-    },
-
-    exportAllLogs() {
-      if (this.fullLogCache.length === 0) return;
-      // 导出时移除 ANSI 颜色码，以便文件更干净
-      const cleanContent = this.fullLogCache.map(i => i.formattedMsg.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'); 
-      const blob = new Blob([cleanContent], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `service_logs_${Date.now()}.log`;
-      link.click();
-      URL.revokeObjectURL(url);
+        /**
+         * @action 4: 模拟导出所有日志 (仅控制台输出)
+         */
+        exportAllLogs() {
+            const logContent = this.logs
+                .map(log => `${log.timestamp} [${log.level}] ${log.service} (${log.userId}): ${log.message}`)
+                .join('\n');
+            
+            console.log(`Exporting ${this.logs.length} logs to a file (MOCK). Content snippet:\n---`);
+            console.log(logContent.substring(0, 500) + '...');
+        }
     }
-  }
 });

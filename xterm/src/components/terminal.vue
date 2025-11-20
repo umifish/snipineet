@@ -79,24 +79,24 @@
 
   const store = useLogStore();
   
-  // === 修复：初始化 ref 必须为 null ===
   const terminalRef = ref<HTMLElement | null>(null);
   let term: Terminal | null = null;
   let fitAddon: FitAddon | null = null;
+  // --- 关键修复：存储滚轮监听器，以便在卸载时移除 ---
+  let wheelListener: ((e: WheelEvent) => void) | null = null; 
   
   // === 常量 ===
-  const TERMINAL_SIZE = 20;
+  const TERMINAL_SIZE = 2000;
   const CURRENT_USER = 'admin'; 
+  const SCROLL_THRESHOLD = 3; // 滚动阈值：3 行以内视为在底部
   
-  // === Xterm 最佳配置 (显式指定 Canvas 渲染器) ===
+  // === Xterm 最佳配置 (Canvas) ===
   const LOG_TERMINAL_CONFIG = {
       // 性能配置
       scrollback: TERMINAL_SIZE, 
       disableStdin: true,         
-      cursorBlink: false,         
       convertEol: true,           
-      rendererType: 'canvas', // <--- 确保使用 Canvas
-  
+      rendererType: 'canvas', 
       // 美观配置
       fontSize: 13,
       fontFamily: 'Menlo, Monaco, monospace',
@@ -148,23 +148,41 @@
     term.loadAddon(new CanvasAddon());
     fitAddon.fit();
     
-    // 监听物理滚动，同步 autoScroll 状态
+    // === 逻辑 1: 基于 Xterm.js Scroll 事件的自动滚动状态同步 (滚动到底部时重新开启) ===
     term.onScroll(() => {
         if (!term || !isLiveMode.value) return; 
   
-        const isAtBottom = term.buffer.active.baseY === term.buffer.active.viewportY;
+        const baseScroll = term.buffer.active.baseY;
+        const viewportScroll = term.buffer.active.viewportY;
+        
+        // 检查是否在底部阈值内
+        const isAtBottom = viewportScroll >= baseScroll - SCROLL_THRESHOLD;
         
         if (isAtBottom && !autoScroll.value) {
             autoScroll.value = true;
-        } else if (!isAtBottom && autoScroll.value) {
-            autoScroll.value = false;
-        }
+        } 
     });
+    
+    // === 逻辑 2: 关键修复 - 直接监听 DOM 滚轮事件，实现灵敏的取消自动滚动 ===
+    const terminalDom = term.element;
+    
+    if (terminalDom) {
+        // 定义监听器函数
+        wheelListener = (e: WheelEvent) => {
+            // e.deltaY < 0 表示用户向上滚动
+            // 如果正在自动滚动且在 Live Mode 下，立即取消自动滚动
+            if (e.deltaY < 0 && autoScroll.value && isLiveMode.value) {
+                autoScroll.value = false;
+            }
+        };
+        // 添加监听器
+        terminalDom.addEventListener('wheel', wheelListener);
+    }
+    // ======================================================================
   
     renderWindow();
   };
   
-  // === 渲染头部 (动态适配窗口大小) ===
   const writeHeader = () => {
     if (!term) return;
     const separator = '-'.repeat(term.cols); 
@@ -206,6 +224,7 @@
   
   // === 交互处理 ===
   const handleSliderInteraction = () => {
+    // 手动操作滑动条，强制取消自动滚动
     autoScroll.value = false;
     renderWindow();
   };
@@ -214,12 +233,21 @@
     returnToLiveMode(); 
   };
   
+  // === 清除逻辑 ===
   const clearView = () => {
+    // 1. 清除底层数据 store
+    store.clearAllLogs(); 
+    
+    // 2. 清除 Xterm 屏幕
     term?.clear();
-    writeHeader(); 
+    
+    // 3. 重置筛选条件
     onlyShowMine.value = false;
+    
+    // 4. 重置 viewport 到 0，并调用 renderWindow 重新绘制空的头部
     returnToLiveMode(); 
   };
+  
   
   watch(autoScroll, (newValue) => {
     if (newValue && isLiveMode.value) {
@@ -228,7 +256,7 @@
   });
   
   
-  // === 轮询逻辑 (包含时序竞争修复) ===
+  // === 轮询逻辑 ===
   const runCycle = async () => {
     const wasInLiveMode = isLiveMode.value; 
     const newItems: LogItem[] = await store.pullAndProcessLogs();
@@ -257,7 +285,6 @@
   
   const onResize = () => {
     fitAddon?.fit();
-    // 尺寸调整后，重新渲染内容以适配新的宽度和高度
     renderWindow(); 
   };
   
@@ -265,12 +292,22 @@
   onMounted(() => {
     initTerminal();
     startPolling();
+    // 全局事件：resize
     window.addEventListener('resize', onResize);
   });
+  
   onUnmounted(() => {
     stopPolling();
-    term?.dispose();
+    // 全局事件清理：resize
     window.removeEventListener('resize', onResize);
+    
+    // --- 关键清理：移除 Xterm.js 上的滚轮事件监听器 ---
+    if (term && term.element && wheelListener) {
+        term.element.removeEventListener('wheel', wheelListener as EventListener);
+    }
+    
+    // 销毁 Xterm 实例
+    term?.dispose();
   });
   </script>
   
