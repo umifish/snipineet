@@ -181,7 +181,7 @@
   </template>
   
   <script setup lang="ts">
-  import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+  import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
   import { Terminal } from '@xterm/xterm';
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { FitAddon } from 'xterm-addon-fit';
@@ -336,11 +336,11 @@ let fitAddon: FitAddon | null = null;
   const initTerminal = () => {
       if (!terminalRef.value) return;
       term = new Terminal(LOG_TERMINAL_CONFIG);
-      fitAddon = new FitAddon();
-      term.loadAddon(fitAddon);
+    fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
       term.loadAddon(new CanvasAddon())
       term.open(terminalRef.value);
-      fitAddon.fit();
+    fitAddon.fit();
       
       // 纵向滚动监听器 (用于处理 Xterm 内部的 baseY/viewportY 计算和状态更新)
       term.onScroll(() => {
@@ -381,36 +381,133 @@ let fitAddon: FitAddon | null = null;
       if (!term) return;
       
       // 【修复】确保 viewportStart 在有效范围内
+      // 注意：clampViewportStart 可能会调整 viewportStart，这可能会影响 isLiveMode
+      // 所以在调用 clampViewportStart 之前，先记录是否需要保持实时模式
+      const shouldBeInLiveMode = isLiveMode.value;
       clampViewportStart();
+      
+      // 【修复】如果之前应该在实时模式，但 clampViewportStart 后不在实时模式，强制设置为实时模式
+      if (shouldBeInLiveMode && !isLiveMode.value) {
+          viewportStart.value = maxSliderValue.value;
+          clampViewportStart();
+      }
       
       const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
       
+      // 【新增】记录当前是否在底部，用于后续恢复滚动状态
+      const wasAtBottom = isTerminalAtBottom.value;
+      
       isWritingToTerminal.value = true;
+      
+      // 【新增】检查是否需要清理超出 scrollback 的内容
+      // 由于使用 term.clear() 会清空所有内容，scrollback 会自动重置
+      // 但为了确保内容不超过 scrollback 限制，我们限制渲染的行数
+      const maxRenderLines = Math.min(logsToRender.length, TERMINAL_SIZE);
+      const logsToRenderLimited = logsToRender.slice(0, maxRenderLines);
+      
       term.clear();
       const separator = '-'.repeat(term.cols);
       term.writeln(`\x1b[90m${separator}\x1b[0m`);
-      logsToRender.forEach(item => term?.writeln(item.formattedMsg));
+      logsToRenderLimited.forEach(item => term?.writeln(item.formattedMsg));
       
+      // 【修复】只在实时模式且自动滚动时才滚动到底部
+      // 如果不在实时模式或不在自动滚动状态，保持当前滚动位置（不滚动到底部）
       if (isLiveMode.value && autoScroll.value) {
-        term.scrollToBottom(); 
+          term.scrollToBottom(); 
           isTerminalAtBottom.value = true;
       } else if (isLiveMode.value) {
           const base = term.buffer.active.baseY;
           const view = term.buffer.active.viewportY;
           isTerminalAtBottom.value = (view >= base - SCROLL_THRESHOLD);
+      } else {
+          // 【新增】不在实时模式时，保持之前的滚动状态
+          // 由于 renderWindow 会清空并重新渲染，滚动位置会被重置
+          // 但由于我们使用的是 viewportStart 来控制显示的内容，内容位置应该已经正确了
+          // 我们只需要确保不自动滚动到底部即可
+          isTerminalAtBottom.value = wasAtBottom;
       }
   
       setTimeout(() => { isWritingToTerminal.value = false; }, 0);
   };
   
   const returnToLiveMode = () => {
+    console.log('returnToLiveMode 被调用', {
+        before: {
+            viewportStart: viewportStart.value,
+            maxSliderValue: maxSliderValue.value,
+            isLiveMode: isLiveMode.value,
+            isPolling: isPolling.value
+        }
+    });
+    
     // 【修复】确保 viewportStart 设置为最新位置
+    // 使用 nextTick 确保 computed 值正确更新
     viewportStart.value = maxSliderValue.value;
     clampViewportStart(); // 确保在有效范围内
+    
+    // 【新增】验证 isLiveMode 是否正确更新
+    // 由于 isLiveMode 是 computed，它应该立即更新
+    // 但如果 maxSliderValue 为 0，isLiveMode 应该是 true（因为 0 >= 0 - 1 = -1）
+    // 如果 maxSliderValue 是负数，isLiveMode 也应该是 true（因为任何数 >= 负数 - 1）
+    if (!isLiveMode.value) {
+        console.warn('returnToLiveMode: isLiveMode 未正确更新，强制设置', {
+            viewportStart: viewportStart.value,
+            maxSliderValue: maxSliderValue.value,
+            isLiveMode: isLiveMode.value,
+            condition: `${viewportStart.value} >= ${maxSliderValue.value} - 1 = ${maxSliderValue.value - 1}`
+        });
+        // 强制设置为最新位置，确保 isLiveMode 为 true
+        // 如果 maxSliderValue 是 0 或负数，设置为 0；否则设置为 maxSliderValue
+        viewportStart.value = Math.max(0, maxSliderValue.value);
+        // 再次验证
+        if (!isLiveMode.value) {
+            console.error('returnToLiveMode: isLiveMode 仍然未正确更新', {
+                viewportStart: viewportStart.value,
+                maxSliderValue: maxSliderValue.value,
+                isLiveMode: isLiveMode.value
+            });
+        }
+    }
+    
     autoScroll.value = true;
     isTerminalAtBottom.value = true;
     renderWindow();
-    // 注意：轮询启动由 watch(isLiveMode) 或 startPolling() 调用者负责
+    
+    // 【修复】使用 nextTick 确保所有状态更新完成后再检查
+    nextTick(() => {
+        console.log('returnToLiveMode 完成 (nextTick)', {
+            after: {
+                viewportStart: viewportStart.value,
+                maxSliderValue: maxSliderValue.value,
+                isLiveMode: isLiveMode.value,
+                isPolling: isPolling.value,
+                missedLogsCount: missedLogsCount.value
+            }
+        });
+        
+        // 【修复】如果处于实时模式且未在轮询，直接启动轮询
+        // 不依赖 watch(isLiveMode)，因为可能存在时序问题
+        // 注意：如果 startPolling 已经被调用（比如从按钮点击），这里不应该再次调用
+        // 检查 pollingTimeout 来判断是否已经在启动过程中
+        // 【关键修复】如果 isPolling 为 true 但 pollingTimeout 为 null，说明状态不一致，需要重置
+        if (isPolling.value && !pollingTimeout) {
+            console.warn('returnToLiveMode: 检测到状态不一致（isPolling=true 但 pollingTimeout=null），重置状态');
+            isPolling.value = false;
+        }
+        
+        if (isLiveMode.value && !isPolling.value && !pollingTimeout && !store.isPermanentError && !isCacheOverflowingInHistoryMode.value) {
+            console.log('returnToLiveMode: 直接启动轮询');
+            startPolling();
+        } else {
+            console.log('returnToLiveMode: 未启动轮询', {
+                isLiveMode: isLiveMode.value,
+                isPolling: isPolling.value,
+                pollingTimeout: pollingTimeout !== null,
+                isPermanentError: store.isPermanentError,
+                isCacheOverflowingInHistoryMode: isCacheOverflowingInHistoryMode.value
+            });
+        }
+    });
   };
   
   // === 交互处理 (保持不变) ===
@@ -470,13 +567,27 @@ let fitAddon: FitAddon | null = null;
   
   
   const loadMoreHistory = async () => {
-      if (!store.hasMoreHistory || store.isFetchingHistory) return 0;
+      if (!store.hasMoreHistory || store.isFetchingHistory || !term) return 0;
       
       // 【修复】记录当前视窗顶部的日志 ID 作为锚点
-      const logs = store.filteredLogs;
-      const currentAnchorId = logs.length > 0 && viewportStart.value < logs.length 
-          ? logs[viewportStart.value].id 
+      const oldLogs = store.filteredLogs;
+      const currentAnchorId = oldLogs.length > 0 && viewportStart.value < oldLogs.length 
+          ? oldLogs[viewportStart.value].id 
           : null;
+      
+      // 【新增】记录当前显示的日志范围，用于后续比较
+      const oldLogsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+      const oldFirstLogId = oldLogsToRender.length > 0 ? oldLogsToRender[0].id : null;
+      
+      // 【新增】记录当前滚动位置（相对于视窗顶部）
+      const buffer = term.buffer.active;
+      const currentViewportY = buffer.viewportY;
+      const currentBaseY = buffer.baseY;
+      // 计算当前视窗顶部相对于缓冲区顶部的行数偏移
+      const scrollOffsetFromTop = currentBaseY - currentViewportY;
+      
+      // 【新增】记录当前缓冲区的总行数，用于检查是否超出 scrollback
+      const currentBufferLength = buffer.length;
       
       const logsAddedCount = await store.fetchOlderLogs();
       
@@ -508,14 +619,112 @@ let fitAddon: FitAddon | null = null;
           
           // 【修复】确保 viewportStart 在有效范围内
           clampViewportStart();
-          renderWindow();
+          
+          // 【关键修复】计算真正新增的日志（在 filteredLogs 中）
+          const newLogsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+          
+          // 【修复】找出真正新增的日志：比较加载前后的 filteredLogs
+          // 新日志应该是在 oldLogs 中不存在的，且位于 newLogs 的开头
+          let actualNewLogs: typeof newLogsToRender = [];
+          if (oldFirstLogId && newLogsToRender.length > 0) {
+              // 找到 oldFirstLogId 在 newLogsToRender 中的位置
+              const oldFirstLogIndex = newLogsToRender.findIndex(log => log.id === oldFirstLogId);
+              if (oldFirstLogIndex > 0) {
+                  // 在 oldFirstLogId 之前的都是新日志
+                  actualNewLogs = newLogsToRender.slice(0, oldFirstLogIndex);
+              } else if (oldFirstLogIndex === -1) {
+                  // oldFirstLogId 不在新列表中，说明所有日志都是新的（可能被过滤掉了）
+                  // 这种情况下，我们需要重新渲染整个窗口
+                  renderWindow();
+                  return logsAddedCount;
+              }
+          } else if (newLogsToRender.length > 0 && oldLogsToRender.length === 0) {
+              // 之前没有日志，现在有日志，所有日志都是新的
+              actualNewLogs = newLogsToRender;
+          }
+          
+          // 【关键修复】如果不在实时模式且有真正的新日志，使用增量更新
+          if (!isLiveMode.value && term && actualNewLogs.length > 0) {
+              const t = term; // 保存引用，避免 TypeScript 错误
+              const newLinesCount = actualNewLogs.length;
+              
+              // 【新增】检查是否会超出 scrollback 限制
+              const maxScrollback = TERMINAL_SIZE;
+              const willExceedScrollback = (currentBufferLength + newLinesCount) > maxScrollback;
+              
+              if (willExceedScrollback) {
+                  // 如果会超出 scrollback，使用完全重新渲染
+                  // Xterm 的 scrollback 会自动清理超出限制的内容，但为了保持一致性，
+                  // 我们使用完全重新渲染来确保内容正确
+                  console.warn(`增量更新会导致超出 scrollback 限制 (${currentBufferLength + newLinesCount} > ${maxScrollback})，使用完全重新渲染`);
+                  renderWindow();
+                  return logsAddedCount;
+              }
+              
+              // 使用增量更新：将现有内容向下滚动 newLinesCount 行
+              t.scrollLines(newLinesCount);
+              
+              // 保存光标位置
+              t.write('\x1b[s');
+              
+              // 移动到第一行
+              t.write('\x1b[H');
+              
+              // 【修复】写入真正新增的日志行（确保顺序正确）
+              actualNewLogs.forEach((item, index) => {
+                  if (index > 0) {
+                      t.write('\r\n');
+                  }
+                  // 清除当前行并写入新内容
+                  t.write('\x1b[2K'); // 清除整行
+                  t.write('\r'); // 回到行首
+                  t.write(item.formattedMsg);
+              });
+              
+              // 恢复光标位置
+              t.write('\x1b[u');
+              
+              // 更新状态：不在底部，不自动滚动
+              isTerminalAtBottom.value = false;
+              autoScroll.value = false;
+          } else {
+              // 在实时模式、没有新日志、或需要完全重新渲染时，使用 renderWindow
+              // 但需要恢复滚动位置
+              renderWindow();
+              
+              // 【新增】恢复滚动位置：等待渲染完成后恢复
+              setTimeout(() => {
+                  if (!term || isLiveMode.value) return;
+                  
+                  const newBuffer = term.buffer.active;
+                  const newBaseY = newBuffer.baseY;
+                  
+                  // 计算目标滚动位置，保持相同的相对偏移
+                  const targetViewportY = Math.max(0, newBaseY - scrollOffsetFromTop);
+                  const currentViewportY = newBuffer.viewportY;
+                  const scrollLines = targetViewportY - currentViewportY;
+                  
+                  if (scrollLines !== 0) {
+                      // 使用 scrollLines 来调整滚动位置
+                      term.scrollLines(scrollLines);
+                      isTerminalAtBottom.value = false;
+                      autoScroll.value = false;
+                  }
+              }, 0);
+          }
     }
+    
+    return logsAddedCount;
   };
   
   const handleSliderInteraction = () => {
     // 【修复】拖动滑块时取消自动锁定，并确保 viewportStart 在有效范围内
     autoScroll.value = false;
     clampViewportStart();
+    
+    // 【新增】如果滑块滑到最新位置，且当前未轮询，则启动轮询
+    // 注意：这里不直接调用 startPolling，而是依赖 watch(isLiveMode) 来启动
+    // 因为 watch(isLiveMode) 会检查 isCacheOverflowingInHistoryMode
   };
   
   const clearView = () => {
@@ -532,8 +741,18 @@ let fitAddon: FitAddon | null = null;
   });
   
   const runCycle = async () => {
+      // 【修复】检查是否应该继续轮询
+      // 只有在历史模式且缓存溢出时才停止轮询
+      // 如果处于实时模式，即使缓存溢出也应该继续轮询（因为用户正在查看最新日志）
       if (isCacheOverflowingInHistoryMode.value) {
           if (isPolling.value) {
+              console.log('停止轮询：缓存溢出且在历史模式', {
+                  totalCount: store.totalCount,
+                  maxCacheSize: MAX_CACHE_SIZE,
+                  isLiveMode: isLiveMode.value,
+                  viewportStart: viewportStart.value,
+                  maxSliderValue: maxSliderValue.value
+              });
               stopPolling(true); 
           }
           return; 
@@ -542,8 +761,15 @@ let fitAddon: FitAddon | null = null;
       // 【修复】如果超过最大重试次数，停止轮询
       if (store.isPermanentError) {
           if (isPolling.value) {
+              console.log('停止轮询：超过最大重试次数');
               stopPolling(true);
           }
+          return;
+      }
+      
+      // 【关键修复】确保 isPolling 为 true 时才继续
+      if (!isPolling.value) {
+          console.log('runCycle: isPolling 为 false，停止执行');
           return;
       }
       
@@ -596,27 +822,134 @@ let fitAddon: FitAddon | null = null;
               }
           }
       } 
+      
+      // 【关键修复】只有在 isPolling 为 true 时才设置 pollingTimeout
+      // 如果 isPolling 为 false，说明轮询已被停止，不应该继续
       if (isPolling.value) { 
-           pollingTimeout = window.setTimeout(runCycle, nextDelay) as unknown as number;
+          pollingTimeout = window.setTimeout(runCycle, nextDelay) as unknown as number;
+          console.log('runCycle: 设置 pollingTimeout', {
+              nextDelay,
+              isPolling: isPolling.value,
+              pollingTimeout: pollingTimeout !== null
+          });
+      } else {
+          console.log('runCycle: isPolling 为 false，不设置 pollingTimeout');
       }
   };
   
   const startPolling = () => {
-    if (pollingTimeout) return;
-    isPolling.value = true;
-    store.resetRetryState(); 
-  
+    if (pollingTimeout) {
+        console.log('轮询已在运行，跳过启动');
+        return;
+    }
+    
+    // 【修复】检查是否应该启动轮询
+    // 如果缓存溢出且在历史模式，不应该启动轮询
+    if (isCacheOverflowingInHistoryMode.value) {
+        console.warn('无法启动轮询：缓存溢出且在历史模式', {
+            totalCount: store.totalCount,
+            maxCacheSize: MAX_CACHE_SIZE,
+            isLiveMode: isLiveMode.value
+        });
+        return;
+    }
+    
+    // 【修复】如果超过最大重试次数，需要用户手动重试
+    if (store.isPermanentError) {
+        console.warn('无法启动轮询：超过最大重试次数');
+        return;
+    }
+    
+    console.log('启动轮询', {
+        isLiveMode: isLiveMode.value,
+        totalCount: store.totalCount,
+        filteredCount: store.filteredCount,
+        viewportStart: viewportStart.value,
+        maxSliderValue: maxSliderValue.value,
+        isPolling: isPolling.value
+    });
+    
+    // 【修复】先调用 returnToLiveMode，再设置 isPolling，避免状态不一致
     // 1. 跳转到最新视图 (设置 autoScroll=true, viewportStart=max, 触发 renderWindow)
     returnToLiveMode(); 
     
-    // 2. 【关键修复】引入 50ms 延迟，确保 Xterm 终端内容完成绘制，避免时序冲突。
-    setTimeout(() => {
-        // 强制锁定并滚动到底部，保证锁定状态的持久性。
-        scrollToBottom(); 
+    // 【修复】在 nextTick 中设置 isPolling，确保 returnToLiveMode 中的检查能正确执行
+    nextTick(() => {
+        // 【修复】再次检查是否应该启动轮询（状态可能在 nextTick 期间发生变化）
+        if (pollingTimeout) {
+            console.log('轮询已在运行，跳过启动');
+            return;
+        }
         
-        // 3. 在滚动完成后，再启动轮询周期。
-        runCycle(); 
-    }, 50); // 50ms 延迟
+        if (isCacheOverflowingInHistoryMode.value) {
+            console.warn('nextTick 检查：缓存溢出且在历史模式，不启动轮询');
+            return;
+        }
+        
+        if (store.isPermanentError) {
+            console.warn('nextTick 检查：超过最大重试次数，不启动轮询');
+            return;
+        }
+        
+        if (!isLiveMode.value) {
+            console.warn('nextTick 检查：不在实时模式，不启动轮询', {
+                viewportStart: viewportStart.value,
+                maxSliderValue: maxSliderValue.value,
+                isLiveMode: isLiveMode.value
+            });
+            return;
+        }
+        
+        // 现在可以安全地设置 isPolling 为 true
+        isPolling.value = true;
+        store.resetRetryState(); 
+        
+        // 2. 【关键修复】引入 50ms 延迟，确保 Xterm 终端内容完成绘制，避免时序冲突。
+        setTimeout(() => {
+            // 【修复】再次检查是否应该继续轮询（状态可能在延迟期间发生变化）
+            if (!isPolling.value) {
+                console.log('轮询已被停止，不再继续');
+                return; // 如果轮询已被停止，不再继续
+            }
+            
+            // 【修复】确保处于实时模式，否则不应该启动轮询
+            if (!isLiveMode.value) {
+                console.warn('延迟检查：不在实时模式，停止轮询', {
+                    viewportStart: viewportStart.value,
+                    maxSliderValue: maxSliderValue.value,
+                    isLiveMode: isLiveMode.value
+                });
+                stopPolling(true);
+                return;
+            }
+            
+            // 【修复】再次检查缓存溢出（可能在延迟期间发生了变化）
+            if (isCacheOverflowingInHistoryMode.value) {
+                console.warn('延迟检查：缓存溢出且在历史模式，停止轮询');
+                stopPolling(true);
+                return;
+            }
+            
+            // 强制锁定并滚动到底部，保证锁定状态的持久性。
+            scrollToBottom(); 
+            
+            // 3. 在滚动完成后，再启动轮询周期。
+            // 【关键修复】确保 runCycle 被调用，如果 runCycle 提前返回，需要重置 isPolling
+            runCycle().catch(err => {
+                console.error('runCycle 执行出错', err);
+                stopPolling(true);
+            });
+            
+            // 【关键修复】检查 runCycle 是否立即返回（没有设置 pollingTimeout）
+            // 如果 runCycle 立即返回且没有设置 pollingTimeout，说明轮询没有真正启动
+            setTimeout(() => {
+                if (isPolling.value && !pollingTimeout) {
+                    console.warn('runCycle 执行后未设置 pollingTimeout，重置 isPolling');
+    isPolling.value = false;
+                }
+            }, 100); // 给 runCycle 一些时间执行
+        }, 50); // 50ms 延迟
+    });
   };
   
   const stopPolling = (isAutomaticPause: boolean = false) => { 
@@ -641,7 +974,10 @@ let fitAddon: FitAddon | null = null;
   watch(isLiveMode, (isLive) => {
       // 【修复】当用户处于最新窗口时（不管是通过滑块、跳转等方式），自动启动轮询
       if (isLive && !isPolling.value && !store.isPermanentError) {
-          startPolling();
+          // 【修复】检查是否应该启动轮询（避免在缓存溢出时启动）
+          if (!isCacheOverflowingInHistoryMode.value) {
+              startPolling();
+          }
       } else if (!isLive && isPolling.value) {
           // 如果离开最新窗口，停止轮询
           stopPolling(true);
