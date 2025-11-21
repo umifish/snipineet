@@ -68,15 +68,15 @@
               <button @click="clearView" class="btn-icon" title="清屏">🧹</button>
               
               <button 
-              v-if="!isPolling && !isCacheOverflowingInHistoryMode"
+              v-if="!isPolling && (!isCacheOverflowingInHistoryMode || store.isPermanentError)"
               @click="startPolling" 
               class="btn-action"
               :class="{
-                  'start': !store.isPollingError,
-                  'permanent-error': store.isPollingError
+                  'start': !store.isPermanentError,
+                  'permanent-error': store.isPermanentError
               }"
               >
-              {{ store.isPollingError ? '重试' : '启动' }}
+              {{ store.isPermanentError ? '重试' : (store.isPollingError ? '重试' : '启动') }}
               </button>
               
               <span v-if="isCacheOverflowingInHistoryMode" class="resume-hint">
@@ -290,6 +290,9 @@ let fitAddon: FitAddon | null = null;
   
   // 滚轮监听器：专用于快速捕捉用户向上滚动意图 (UNLOCK)
   const wheelListener = (e: WheelEvent) => {
+      // 【修复】在写入终端时抑制滚轮事件，避免触发不必要的状态更新
+      if (isWritingToTerminal.value) return;
+      
       if (e.deltaY < 0) {
           if (isLiveMode.value && autoScroll.value) {
               autoScroll.value = false;
@@ -299,11 +302,17 @@ let fitAddon: FitAddon | null = null;
   
   // DOM Scroll 监听器：专用于快速捕捉用户滚动到底部的意图 (RE-LOCK) 或离开底部的意图 (UNLOCK)
   const domScrollListener = (e: Event) => {
+      // 【修复】在写入终端时抑制滚动事件，避免触发不必要的状态更新
+      if (isWritingToTerminal.value) return;
+      
       const target = e.target as HTMLElement;
-      if (!target || !isLiveMode.value) return;
+      if (!target || !isLiveMode.value) return; 
   
       // 检查是否滚动到底部。
       const isAtBottomDOM = target.scrollHeight - target.scrollTop <= target.clientHeight + 3; 
+  
+      // 【修复】同步更新 isTerminalAtBottom 状态
+      isTerminalAtBottom.value = isAtBottomDOM;
   
       // 1. Re-Lock Logic (用户滚到底部时，如果未锁定，则锁定)
       if (isAtBottomDOM && !autoScroll.value) {
@@ -335,6 +344,9 @@ let fitAddon: FitAddon | null = null;
       
       // 纵向滚动监听器 (用于处理 Xterm 内部的 baseY/viewportY 计算和状态更新)
       term.onScroll(() => {
+          // 【修复】在写入终端时抑制滚动事件，避免触发不必要的状态更新
+          if (isWritingToTerminal.value) return;
+          
           if (!term || !isLiveMode.value) return; 
           
           const baseScroll = term.buffer.active.baseY;
@@ -397,7 +409,8 @@ let fitAddon: FitAddon | null = null;
     clampViewportStart(); // 确保在有效范围内
     autoScroll.value = true;
     isTerminalAtBottom.value = true;
-    renderWindow(); 
+    renderWindow();
+    // 注意：轮询启动由 watch(isLiveMode) 或 startPolling() 调用者负责
   };
   
   // === 交互处理 (保持不变) ===
@@ -409,22 +422,48 @@ let fitAddon: FitAddon | null = null;
       }
   };
   
+  // 【修复】确保组件和 store 之间的双向同步
   watch(currentFilterMode, (mode) => {
       store.setFilterMode(mode);
       returnToLiveMode();
   });
+  watch(() => store.filterMode, (mode) => {
+      if (currentFilterMode.value !== mode) {
+          currentFilterMode.value = mode;
+      }
+  });
+  
   watch(levelFilter, (val) => {
       store.setLevelFilter(val);
       returnToLiveMode();
   });
+  watch(() => store.levelFilter, (val) => {
+      if (levelFilter.value !== val) {
+          levelFilter.value = val;
+      }
+  });
+  
   watch([groupIdFilter, clientIdFilter], ([newGroup, newClient]) => {
       if (debounceTimeout) clearTimeout(debounceTimeout);
-      debounceTimeout = setTimeout(() => {
+      debounceTimeout = window.setTimeout(() => {
           store.setGroupIdFilter(newGroup || null);
           store.setClientIdFilter(newClient || null);
           returnToLiveMode();
       }, 300);
   });
+  watch(() => store.groupIdFilter, (val) => {
+      const newVal = val || '';
+      if (groupIdFilter.value !== newVal) {
+          groupIdFilter.value = newVal;
+      }
+  });
+  watch(() => store.clientIdFilter, (val) => {
+      const newVal = val || '';
+      if (clientIdFilter.value !== newVal) {
+          clientIdFilter.value = newVal;
+      }
+  });
+  
   watch(() => store.userIdFilter, () => {
       returnToLiveMode();
   });
@@ -440,6 +479,14 @@ let fitAddon: FitAddon | null = null;
           : null;
       
       const logsAddedCount = await store.fetchOlderLogs();
+      
+      // 【修复】如果返回 -1，表示超出缓存上限，需要停止轮询
+      if (logsAddedCount === -1) {
+          if (isPolling.value) {
+              stopPolling(true);
+          }
+          return 0;
+      }
       
       if (logsAddedCount > 0) {
           const newLogs = store.filteredLogs;
@@ -477,9 +524,10 @@ let fitAddon: FitAddon | null = null;
   };
   
   watch(autoScroll, (newValue) => {
+    // 【修复】移除冗余检查，当 autoScroll 为 true 且处于 Live Mode 时，滚动到底部
     if (newValue && isLiveMode.value) {
       term?.scrollToBottom();
-      if(newValue) isTerminalAtBottom.value = true;
+      isTerminalAtBottom.value = true;
     }
   });
   
@@ -491,10 +539,35 @@ let fitAddon: FitAddon | null = null;
           return; 
       }
       
+      // 【修复】如果超过最大重试次数，停止轮询
+      if (store.isPermanentError) {
+          if (isPolling.value) {
+              stopPolling(true);
+          }
+          return;
+      }
+      
       const wasInLiveMode = isLiveMode.value; 
       const { newLogs, nextDelay } = await store.pullAndProcessLogs();
+      
+      // 【修复】如果 nextDelay 为 0，表示需要停止轮询（超过最大重试次数）
+      if (nextDelay === 0) {
+          if (isPolling.value) {
+              stopPolling(true);
+          }
+          return;
+      }
   
       if (wasInLiveMode) {
+          // 【修复】再次检查是否仍在 Live Mode（用户可能在异步操作期间切换了模式）
+          if (!isLiveMode.value) {
+              // 如果已经切换到历史模式，不追加日志，直接返回
+              if (isPolling.value) { 
+                  pollingTimeout = window.setTimeout(runCycle, nextDelay) as unknown as number;
+              }
+              return;
+          }
+          
           viewportStart.value = maxSliderValue.value; 
           if (!store.isPollingError && newLogs.length > 0) {
               
@@ -510,18 +583,21 @@ let fitAddon: FitAddon | null = null;
                   )
               );
   
-              isWritingToTerminal.value = true;
-              itemsToRender.forEach(item => term?.writeln(item.formattedMsg));
-              
-              if (autoScroll.value) {
-                  term.scrollToBottom();
-                  isTerminalAtBottom.value = true;
-    }
-              setTimeout(() => { isWritingToTerminal.value = false; }, 0);
+              if (itemsToRender.length > 0 && term) {
+                  isWritingToTerminal.value = true;
+                  const currentTerm = term; // 保存引用，避免类型检查问题
+                  itemsToRender.forEach(item => currentTerm.writeln(item.formattedMsg));
+                  
+                  if (autoScroll.value) {
+                      currentTerm.scrollToBottom();
+                      isTerminalAtBottom.value = true;
+                  }
+                  setTimeout(() => { isWritingToTerminal.value = false; }, 0);
+              }
           }
       } 
       if (isPolling.value) { 
-           pollingTimeout = window.setTimeout(runCycle, nextDelay);
+           pollingTimeout = window.setTimeout(runCycle, nextDelay) as unknown as number;
       }
   };
   
@@ -556,11 +632,20 @@ let fitAddon: FitAddon | null = null;
   };
   
   watch(() => store.isPollingError, (isError) => {
-      if (isError && isPolling.value) stopPolling(true);
+      // 【修复】只有在超过最大重试次数时才停止轮询，否则继续重试
+      if (isError && store.isPermanentError && isPolling.value) {
+          stopPolling(true);
+      }
   });
   
   watch(isLiveMode, (isLive) => {
-      if (isLive && !isPolling.value) startPolling();
+      // 【修复】当用户处于最新窗口时（不管是通过滑块、跳转等方式），自动启动轮询
+      if (isLive && !isPolling.value && !store.isPermanentError) {
+          startPolling();
+      } else if (!isLive && isPolling.value) {
+          // 如果离开最新窗口，停止轮询
+          stopPolling(true);
+      }
   });
 
   // 【修复】监听 filteredCount 变化，当缓存被截断时自动调整 viewportStart
@@ -597,6 +682,12 @@ let fitAddon: FitAddon | null = null;
   });
   
   onMounted(() => {
+    // 【修复】初始化过滤状态，确保组件和 store 同步
+    currentFilterMode.value = store.filterMode;
+    levelFilter.value = store.levelFilter;
+    groupIdFilter.value = store.groupIdFilter || '';
+    clientIdFilter.value = store.clientIdFilter || '';
+    
     initTerminal();
     startPolling();
     window.addEventListener('resize', onResize);
