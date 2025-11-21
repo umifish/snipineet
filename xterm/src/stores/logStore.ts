@@ -1,328 +1,354 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 
-// === 类型定义 ===
+// === 1. 类型和常量定义 ===
+
+export type LogLevel = 'ERROR' | 'WARN' | 'INFO' | 'DEBUG';
+export type FilterMode = 'ALL' | 'NONE' | 'LEVEL' | 'GROUP_ID' | 'CLIENT_ID' | 'USER_ID';
+
 export interface LogItem {
     id: number;
-    timestamp: number;
+    timestamp: number; // Unix timestamp in ms
+    level: LogLevel;
     serviceName: string;
-    userId: string;
-    // 新增字段
+    userId: string | null;
     groupId: string;
     clientId: string;
-    
-    level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
     message: string;
-    formattedMsg: string; 
+    formattedMsg: string; // 包含 ANSI 颜色的格式化消息
 }
 
-export type FilterMode = 'NONE' | 'ALL' | 'LEVEL' | 'GROUP_ID' | 'CLIENT_ID' | 'USER_ID';
+export const MAX_CACHE_SIZE = 10000;
+export const POLL_INTERVAL_BASE = 2000; // 基础轮询间隔 2s
+const MAX_MOCK_HISTORY_SIZE = 50000; // 模拟的总历史日志条数
+const HISTORY_PAGE_SIZE = 1000;      // 每次加载历史的页大小
 
-// === 常量与配置 ===
-export const MAX_CACHE_SIZE = 20000; // 缓存日志的最大容量
-const MAX_RETRIES = 10;             // 最大重试次数
-const DEFAULT_POLL_DELAY = 2000;    // 默认轮询间隔 (2秒)
+// 模拟的用户和 ID
+const MOCK_USERS = ['admin', 'userA', 'userB', null];
+const MOCK_SERVICES = ['AuthService', 'DataProcessor', 'Gateway', 'Analytics'];
+const MOCK_GROUPS = ['A100', 'B200', 'C300'];
+const MOCK_CLIENTS = ['ClientX', 'ClientY', 'ClientZ'];
 
-const INITIAL_LOG_COUNT = 5000; 
-const INITIAL_LOG_OFFSET = 10000; 
-const TRUE_START_ID = 1; 
 
-// === 模拟 API 调用 ===
+// === 2. 通用过滤逻辑抽象 ===
 
-function formatLogMessage(timestamp: number, serviceName: string, userId: string, groupId: string, clientId: string, level: string, message: string): string {
-    const timeStr = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false });
+/**
+ * 根据当前的过滤模式和参数，判断单个 LogItem 是否应该被显示。
+ * @param item - 要检查的日志项。
+ * @param mode - 当前的过滤模式。
+ * @param levelFilter - 级别过滤器。
+ * @param groupIdFilter - 组ID过滤器。
+ * @param clientIdFilter - 客户端ID过滤器。
+ * @param userIdFilter - 用户ID过滤器。
+ * @returns boolean - true 表示应该显示，false 表示应该隐藏。
+ */
+export const shouldLogBeDisplayed = (
+    item: LogItem,
+    mode: FilterMode,
+    levelFilter: string | null,
+    groupIdFilter: string | null,
+    clientIdFilter: string | null,
+    userIdFilter: string | null
+): boolean => {
+    if (mode === 'NONE') return true;
     
-    const colors = {
-        INFO: '\x1b[32m',    
-        WARN: '\x1b[33m',    
-        ERROR: '\x1b[31m',   
-        DEBUG: '\x1b[36m',   
-        RESET: '\x1b[0m',
-        GRAY: '\x1b[90m', 
+    let match = true; 
+
+    // ALL 模式：必须同时满足所有启用的过滤器
+    if (mode === 'ALL') {
+        if (userIdFilter && item.userId !== userIdFilter) match = false;
+        if (levelFilter && item.level !== levelFilter) match = false;
+        if (groupIdFilter && groupIdFilter.length > 0 && !item.groupId.includes(groupIdFilter)) match = false;
+        if (clientIdFilter && clientIdFilter.length > 0 && !item.clientId.includes(clientIdFilter)) match = false;
+    } 
+    // 单一模式：仅根据当前模式的过滤器判断
+    else if (mode === 'LEVEL') {
+        if (levelFilter && item.level !== levelFilter) match = false;
+    } else if (mode === 'GROUP_ID') {
+        if (groupIdFilter && groupIdFilter.length > 0 && !item.groupId.includes(groupIdFilter)) match = false;
+    } else if (mode === 'CLIENT_ID') {
+        if (clientIdFilter && clientIdFilter.length > 0 && !item.clientId.includes(clientIdFilter)) match = false;
+    } else if (mode === 'USER_ID') {
+        if (userIdFilter && item.userId !== userIdFilter) match = false;
+    }
+
+    return match;
+};
+
+
+// === 3. 模拟工具函数 (用于生成数据) ===
+
+let mockLogIdCounter = MAX_MOCK_HISTORY_SIZE;
+
+const getLogColor = (level: LogLevel) => {
+  switch (level) {
+      case 'ERROR': return '\x1b[31m'; // Red (Error)
+      case 'WARN': return '\x1b[33m'; // Yellow (Warning)
+      case 'INFO': return '\x1b[32m'; // Green (NEW: Map INFO to Green for Success tone)
+      case 'DEBUG': return '\x1b[90m'; // Bright Black/Dim (NEW: Map DEBUG to Dim/Low Priority)
+      default: return '\x1b[0m'; // Reset
+  }
+};
+
+const formatLog = (item: Omit<LogItem, 'formattedMsg'>): string => {
+  const reset = '\x1b[0m';
+  const dim = '\x1b[90m'; // 映射到 brightBlack (中灰/浅色模式下的时间戳颜色)
+  const color = getLogColor(item.level);
+
+  // [列]            [ANSI 颜色] [映射到的 Xterm 主题颜色]
+  return [
+      `${dim}${new Date(item.timestamp).toISOString()}${reset}`,
+      `\x1b[36m${item.serviceName.padEnd(12)}${reset}`, // Cyan (Service Name)
+      `\x1b[34m${(item.userId || 'N/A').padEnd(8)}${reset}`, // Blue (User ID)
+      `\x1b[35m${(item.groupId + '/' + item.clientId).padEnd(14)}${reset}`, // Magenta (Group/Client ID)
+      `${color}${item.level.padEnd(5)}${reset}`,
+      `${item.message}`
+  ].join('  ');
+};
+
+const mockLogGeneration = (id: number, timestamp: number, isHistorical: boolean): LogItem => {
+    const level: LogLevel = ['INFO', 'INFO', 'INFO', 'DEBUG', 'WARN', 'ERROR'][Math.floor(Math.random() * 6)] as LogLevel;
+    const serviceName = MOCK_SERVICES[Math.floor(Math.random() * MOCK_SERVICES.length)];
+    const userId = MOCK_USERS[Math.floor(Math.random() * MOCK_USERS.length)];
+    const groupId = MOCK_GROUPS[Math.floor(Math.random() * MOCK_GROUPS.length)];
+    const clientId = MOCK_CLIENTS[Math.floor(Math.random() * MOCK_CLIENTS.length)];
+    const message = isHistorical 
+        ? `[History #${id}] Log message for ${serviceName} at level ${level}.`
+        : `[LIVE #${id}] Processing request for ${userId || 'guest'}.`;
+    
+    const baseItem: Omit<LogItem, 'formattedMsg'> = {
+        id,
+        timestamp,
+        level,
+        serviceName,
+        userId,
+        groupId,
+        clientId,
+        message,
     };
+    
+    return {
+        ...baseItem,
+        formattedMsg: formatLog(baseItem),
+    };
+};
 
-    const levelColor = colors[level as keyof typeof colors] || colors.RESET;
-
-    // 格式化包含 Group 和 Client 信息
-    return `${colors.GRAY}${timeStr.padEnd(10)}\x1b[0m ` +
-           `\x1b[35m${serviceName.padEnd(12)}\x1b[0m ` + 
-           `\x1b[36m${userId.padEnd(10)}\x1b[0m ` +      
-           `\x1b[90m[${groupId}|${clientId}]\x1b[0m ` + 
-           `${levelColor}${level.padEnd(6)}${colors.RESET} ` +        
-           `${message}`;
-}
-
-const mockLogs = (startId: number, count: number): LogItem[] => {
+const generateMockLogs = (count: number, startId: number, startTime: number, isHistorical: boolean = false): LogItem[] => {
     const logs: LogItem[] = [];
-    const services = ['AuthService', 'Gateway', 'Payment', 'Inventory'];
-    const users = ['admin', 'userA', 'userB', 'guest'];
-    const groups = ['g-dev', 'g-ops', 'g-test'];
-    const clients = ['web', 'ios', 'android'];
-    const levels: ('INFO' | 'WARN' | 'ERROR' | 'DEBUG')[] = ['INFO', 'WARN', 'ERROR', 'DEBUG'];
-    const messages = [
-        'Request processed successfully.',
-        'User logged out.',
-        'Database connection timeout.',
-        'Item added to cart.',
-        'DEBUG: Cache read latency is high.'
-    ];
-
     for (let i = 0; i < count; i++) {
         const id = startId + i;
-        const timestamp = Date.now() - (count - i) * 1000 + Math.random() * 500;
-        const serviceName = services[Math.floor(Math.random() * services.length)];
-        const userId = users[Math.floor(Math.random() * users.length)];
-        const groupId = groups[Math.floor(Math.random() * groups.length)];
-        const clientId = clients[Math.floor(Math.random() * clients.length)];
-        const level = levels[Math.floor(Math.random() * levels.length)];
-        const message = messages[Math.floor(Math.random() * messages.length)];
-        
-        const formattedMsg = formatLogMessage(timestamp, serviceName, userId, groupId, clientId, level, message + ` (ID: ${id})`);
-        
-        logs.push({
-            id,
-            timestamp,
-            serviceName,
-            userId,
-            groupId,
-            clientId,
-            level,
-            message,
-            formattedMsg
-        });
+        const timestamp = startTime + i * (isHistorical ? -100 : 100); // 历史日志时间倒序
+        logs.push(mockLogGeneration(id, timestamp, isHistorical));
     }
     return logs;
 };
 
-const mockFetchOlderLogs = (beforeId: number, count: number): LogItem[] => {
-    // 场景 1: 缓存已清除 (beforeId=0)，加载初始数据
-    if (beforeId === 0) {
-        return mockLogs(INITIAL_LOG_OFFSET, INITIAL_LOG_COUNT);
-    }
-    // 场景 2: 已到达绝对起点
-    if (beforeId <= TRUE_START_ID) {
-        return []; 
-    }
-    // 场景 3: 正常加载
-    const startId = Math.max(TRUE_START_ID, beforeId - count);
-    const numToFetch = beforeId - startId;
-    return mockLogs(startId, numToFetch);
-};
 
-const mockPullNewLogs = (lastId: number): LogItem[] => {
-    // 模拟 5% 的网络/API 失败概率
-    if (Math.random() < 0.05) { 
-        throw new Error("Simulated network failure or API exception.");
-    }
-    
-    const newLogsCount = Math.floor(Math.random() * 5) + 5; 
-    if (newLogsCount === 0) return [];
-    
-    const logs = mockLogs(lastId + 1, newLogsCount);
-    return logs;
-};
+// === 4. Pinia Store 定义 ===
 
-// === Pinia Store ===
-export const useLogStore = defineStore('log', () => {
-    
-    const allLogs = ref<LogItem[]>(mockLogs(INITIAL_LOG_OFFSET, INITIAL_LOG_COUNT));
-    
-    // 筛选状态
+export const useLogStore = defineStore('logTerminal', () => {
+    // === 状态 State ===
+    const logCache = ref<LogItem[]>(generateMockLogs(500, 1, Date.now() - 500 * 100)); // 初始缓存
+    const nextHistoryIdToLoad = ref(MAX_MOCK_HISTORY_SIZE + 1);
+    const lastPolledId = ref(mockLogIdCounter);
+
+    // 过滤状态
     const filterMode = ref<FilterMode>('ALL');
-    const userIdFilter = ref<string | null>(null);
     const levelFilter = ref<string | null>(null); 
     const groupIdFilter = ref<string | null>(null);
     const clientIdFilter = ref<string | null>(null);
-    
-    // 运行状态
-    const isFetchingHistory = ref(false);
-    const historyExhausted = ref(false); 
-    
-    // 重试状态
+    const userIdFilter = ref<string | null>(null);
+
+    // 轮询状态
+    const isPollingError = ref(false);
     const retryCount = ref(0);
-    const isPollingError = ref(false); 
+    const isFetchingHistory = ref(false);
 
-    // === 计算属性: 过滤逻辑 ===
+
+    // === 计算属性 Getters ===
+    
+    // 💡 【关键】使用 shouldLogBeDisplayed 来计算过滤后的日志
     const filteredLogs = computed(() => {
-        const mode = filterMode.value;
-        const logs = allLogs.value;
-
-        if (mode === 'NONE') {
-            return logs;
-        }
-
-        return logs.filter(log => {
-            // ALL: 交集
-            if (mode === 'ALL') {
-                let match = true;
-                if (levelFilter.value) match = match && log.level === levelFilter.value;
-                if (groupIdFilter.value) match = match && log.groupId.includes(groupIdFilter.value);
-                if (clientIdFilter.value) match = match && log.clientId.includes(clientIdFilter.value);
-                if (userIdFilter.value) match = match && log.userId === userIdFilter.value;
-                return match;
-            }
-
-            // 单一模式
-            if (mode === 'LEVEL') {
-                return levelFilter.value ? log.level === levelFilter.value : true;
-            }
-            if (mode === 'GROUP_ID') {
-                return groupIdFilter.value ? log.groupId.includes(groupIdFilter.value) : true;
-            }
-            if (mode === 'CLIENT_ID') {
-                return clientIdFilter.value ? log.clientId.includes(clientIdFilter.value) : true;
-            }
-            if (mode === 'USER_ID') {
-                return userIdFilter.value ? log.userId === userIdFilter.value : true;
-            }
-
-            return true;
-        });
+        // 传递所有需要的过滤状态给通用函数
+        return logCache.value.filter(item => 
+            shouldLogBeDisplayed(
+                item,
+                filterMode.value,
+                levelFilter.value,
+                groupIdFilter.value,
+                clientIdFilter.value,
+                userIdFilter.value
+            )
+        );
     });
 
-    // 统计信息
-    const totalCount = computed(() => allLogs.value.length);
+    const totalCount = computed(() => logCache.value.length);
     const filteredCount = computed(() => filteredLogs.value.length);
-    const latestLogId = computed(() => allLogs.value.length > 0 ? allLogs.value[allLogs.value.length - 1].id : 0);
-    const earliestLogId = computed(() => allLogs.value.length > 0 ? allLogs.value[0].id : 0);
+
+    // 检查是否还有更旧的日志可以加载
+    const hasMoreHistory = computed(() => nextHistoryIdToLoad.value > 1);
+
+
+    // === 动作 Actions ===
+
+    const setFilterMode = (mode: FilterMode) => { filterMode.value = mode; };
+    const setLevelFilter = (level: string | null) => { levelFilter.value = level; };
+    const setGroupIdFilter = (id: string | null) => { groupIdFilter.value = id; };
+    const setClientIdFilter = (id: string | null) => { clientIdFilter.value = id; };
+    const setUserIdFilter = (id: string | null) => { userIdFilter.value = id; };
     
-    const hasMoreHistory = computed(() => {
-        if (allLogs.value.length === 0) return true; 
-        return !historyExhausted.value;
-    });
-
-    // --- Actions ---
-
-    const getLogSlice = (start: number, size: number): LogItem[] => {
-        const logs = filteredLogs.value;
-        const total = logs.length;
-        const startIndex = Math.max(0, Math.min(start, total - 1));
-        return logs.slice(startIndex, startIndex + size);
+    const resetRetryState = () => { isPollingError.value = false; retryCount.value = 0; };
+    
+    const clearAllLogs = () => {
+        logCache.value = [];
+        // 清除缓存也应该重置历史指针，但保持 ID 计数器递增
+        // nextHistoryIdToLoad.value = MAX_MOCK_HISTORY_SIZE + 1; 
+        // lastPolledId.value = mockLogIdCounter;
     };
-    
-    const getNextRetryDelay = (count: number): number => {
-        const baseDelay = Math.min(30000, DEFAULT_POLL_DELAY * Math.pow(2, count - 1));
-        const jitter = Math.random() * 1000; 
-        return Math.floor(baseDelay + jitter);
-    }
-    
-    const pullAndProcessLogs = async (): Promise<{ newLogs: LogItem[], nextDelay: number }> => {
-        if (isPollingError.value) {
-            return { newLogs: [], nextDelay: getNextRetryDelay(retryCount.value) };
+
+
+    /**
+     * 获取过滤后日志的切片，用于虚拟滚动。
+     */
+    const getLogSlice = (start: number, size: number): LogItem[] => {
+        return filteredLogs.value.slice(start, start + size);
+    };
+
+
+    /**
+     * 模拟加载更旧的历史日志。
+     */
+    const fetchOlderLogs = async (): Promise<number> => {
+        if (!hasMoreHistory.value || isFetchingHistory.value) return 0;
+        
+        isFetchingHistory.value = true;
+        await new Promise(resolve => setTimeout(resolve, 500)); // 模拟网络延迟
+
+        const startId = Math.max(1, nextHistoryIdToLoad.value - HISTORY_PAGE_SIZE);
+        const count = nextHistoryIdToLoad.value - startId;
+        
+        // 模拟时间倒序
+        const startTime = Date.now() - (MAX_MOCK_HISTORY_SIZE - startId) * 1000; 
+
+        if (count > 0) {
+            const olderLogs = generateMockLogs(count, startId, startTime, true);
+            
+            // 将旧日志添加到缓存的开头
+            logCache.value.unshift(...olderLogs);
+            
+            // 更新下次加载的ID
+            nextHistoryIdToLoad.value = startId;
+
+            isFetchingHistory.value = false;
+            return count;
         }
+
+        isFetchingHistory.value = false;
+        return 0;
+    };
+
+
+    /**
+     * 模拟轮询获取新日志并处理缓存溢出。
+     */
+    const pullAndProcessLogs = async (): Promise<{ newLogs: LogItem[], nextDelay: number }> => {
+        let newLogs: LogItem[] = [];
+        let nextDelay = POLL_INTERVAL_BASE;
         
         try {
-            const newLogs = mockPullNewLogs(latestLogId.value);
+            // 模拟 API 失败
+            if (Math.random() < 0.05 && retryCount.value < 3) {
+                throw new Error("Simulated API failure.");
+            }
             
-            if (newLogs.length > 0) {
-                allLogs.value.push(...newLogs);
-                if (allLogs.value.length > MAX_CACHE_SIZE) {
-                    allLogs.value = allLogs.value.slice(allLogs.value.length - MAX_CACHE_SIZE);
+            // 模拟 API 延迟
+            await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100));
+
+            // 模拟生成 5-15 条新日志
+            const newLogCount = 5 + Math.floor(Math.random() * 10);
+            mockLogIdCounter += newLogCount;
+            const startId = lastPolledId.value + 1;
+            
+            newLogs = generateMockLogs(newLogCount, startId, Date.now());
+            
+            // 更新 ID 和缓存
+            lastPolledId.value = mockLogIdCounter;
+            logCache.value.push(...newLogs);
+
+            isPollingError.value = false;
+            retryCount.value = 0; // 成功则重置重试计数
+
+            // 缓存溢出处理
+            if (logCache.value.length > MAX_CACHE_SIZE) {
+                const logsToRemove = logCache.value.length - MAX_CACHE_SIZE;
+                logCache.value.splice(0, logsToRemove);
+                
+                // 如果是历史模式，需要调整历史指针
+                if (nextHistoryIdToLoad.value <= logsToRemove) {
+                    nextHistoryIdToLoad.value = 1; // 溢出太多，历史加载到底
+                } else {
+                    nextHistoryIdToLoad.value -= logsToRemove;
                 }
             }
             
-            if (retryCount.value > 0) {
-                console.log(`Polling succeeded after ${retryCount.value} retries.`);
-            }
-            retryCount.value = 0;
-            return { newLogs, nextDelay: DEFAULT_POLL_DELAY };
-
-        } catch (e: any) {
+        } catch (error) {
+            console.error("Polling failed:", error);
+            isPollingError.value = true;
             retryCount.value++;
-            if (retryCount.value >= MAX_RETRIES) {
-                isPollingError.value = true;
-            }
-            const delay = getNextRetryDelay(retryCount.value);
-            return { newLogs: [], nextDelay: delay };
+            // 失败后，下次轮询间隔加倍
+            nextDelay = POLL_INTERVAL_BASE * Math.pow(2, retryCount.value); 
         }
-    };
 
-    const fetchOlderLogs = async (): Promise<number> => {
-        if (isFetchingHistory.value || (historyExhausted.value && allLogs.value.length > 0)) return 0;
-
-        isFetchingHistory.value = true;
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        const beforeId = earliestLogId.value;
-        const olderLogs = mockFetchOlderLogs(beforeId, 1000);
-        isFetchingHistory.value = false;
-
-        if (olderLogs.length > 0) {
-            allLogs.value.unshift(...olderLogs);
-            historyExhausted.value = false; 
-            return olderLogs.length;
-        } else {
-            if (beforeId > 0) {
-                historyExhausted.value = true;
-            }
-            return 0;
-        }
+        return { newLogs, nextDelay };
     };
     
-    const resetRetryState = () => {
-        retryCount.value = 0;
-        isPollingError.value = false;
-    };
-
-    // Setters
-    const setFilterMode = (mode: FilterMode) => { filterMode.value = mode; };
-    const setUserIdFilter = (val: string | null) => { userIdFilter.value = val; };
-    const setLevelFilter = (val: string | null) => { levelFilter.value = val; };
-    const setGroupIdFilter = (val: string | null) => { groupIdFilter.value = val; };
-    const setClientIdFilter = (val: string | null) => { clientIdFilter.value = val; };
-
-    const clearAllLogs = () => {
-        allLogs.value = [];
-        userIdFilter.value = null;
-        levelFilter.value = null;
-        groupIdFilter.value = null;
-        clientIdFilter.value = null;
-        historyExhausted.value = false;
-        resetRetryState();
-    };
-
+    
+    /**
+     * 模拟导出所有日志为 JSON 或其他格式。
+     */
     const exportAllLogs = () => {
-        const content = allLogs.value.map(log => 
-            `${new Date(log.timestamp).toISOString()} [${log.level}] [${log.groupId}|${log.clientId}] ${log.serviceName} (${log.userId}): ${log.message}`
-        ).join('\n');
-        const blob = new Blob([content], { type: 'text/plain' });
+        const json = JSON.stringify(logCache.value, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `log_export_${new Date().toISOString()}.log`;
+        a.download = `log_export_${Date.now()}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     };
 
+
     return {
-        allLogs,
-        filteredLogs,
         // State
+        logCache,
         filterMode,
-        userIdFilter,
         levelFilter,
         groupIdFilter,
         clientIdFilter,
+        userIdFilter,
+        isPollingError,
+        retryCount,
         isFetchingHistory,
-        historyExhausted, 
+        
+        // Getters
         totalCount,
         filteredCount,
+        filteredLogs,
         hasMoreHistory,
-        retryCount,
-        isPollingError,
+        
         // Actions
-        getLogSlice,
-        pullAndProcessLogs,
-        resetRetryState,
-        fetchOlderLogs,
         setFilterMode,
-        setUserIdFilter,
         setLevelFilter,
         setGroupIdFilter,
         setClientIdFilter,
+        setUserIdFilter,
+        resetRetryState,
         clearAllLogs,
-        exportAllLogs
+        fetchOlderLogs,
+        pullAndProcessLogs,
+        getLogSlice,
+        exportAllLogs,
     };
 });

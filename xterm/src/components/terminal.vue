@@ -143,13 +143,18 @@
         <span class="time-label">最新</span>
       </div>
   
-      <div class="column-header">
-          <span class="col-timestamp">Timestamp</span>
-          <span class="col-service">Service Name</span>
-          <span class="col-user">User</span>
-          <span class="col-group">Group/Client</span>
-          <span class="col-level">Level</span>
-          <span class="col-message">Message</span>
+      <div 
+          class="column-header-wrapper" 
+          :style="{ transform: 'translateX(' + horizontalScrollOffset + 'px)' }"
+      >
+          <div class="column-header">
+              <span class="col-timestamp">Timestamp</span>
+              <span class="col-service">Service Name</span>
+              <span class="col-user">User</span>
+              <span class="col-group">Group/Client</span>
+              <span class="col-level">Level</span>
+              <span class="col-message">Message</span>
+          </div>
       </div>
   
       <div class="term-box">
@@ -181,19 +186,20 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { FitAddon } from 'xterm-addon-fit';
   import '@xterm/xterm/css/xterm.css';
-  import { useLogStore, type LogItem, MAX_CACHE_SIZE, type FilterMode } from '../stores/logStore';
+  import { useLogStore, MAX_CACHE_SIZE, type FilterMode, shouldLogBeDisplayed } from '../stores/logStore';
   
   const store = useLogStore();
   
   const terminalRef = ref<HTMLElement | null>(null);
   let term: Terminal | null = null;
   let fitAddon: FitAddon | null = null;
-  let wheelListener: ((e: WheelEvent) => void) | null = null; 
+  let viewportElement: HTMLElement | null = null;
   
   const TERMINAL_SIZE = 2000;
   const CURRENT_USER = 'admin'; 
   const SCROLL_THRESHOLD = 3; 
   
+  // ✨ 终端配置采用新的漂亮浅色主题 ✨
   const LOG_TERMINAL_CONFIG = {
       scrollback: TERMINAL_SIZE,           
       disableStdin: true,           
@@ -202,15 +208,18 @@
       fontSize: 12,
       fontFamily: 'Menlo, Monaco, monospace',
       theme: {
-          background: '#FFFFFF',          
-          foreground: '#333333',          
-          cursor: '#333333',              
-          red: '#C82828',                 
-          yellow: '#DE935F',              
-          green: '#718C00',               
-          cyan: '#4271AE',                
-          magenta: '#8959A8',             
-          brightBlack: '#666666',         
+          background: '#FAFAFA',          // 极浅灰色背景 (Soft White)
+          foreground: '#383A42',          // 柔和深色文本 (Soft Black)
+          cursor: '#007ACC',              // 强调蓝作为光标色
+          
+          // 关键 ANSI 颜色 (配合 Store 中的格式化)
+          red: '#E4564A',                 // 温暖的错误红
+          yellow: '#9D7A00',              // 深金色警告
+          green: '#50A14F',               // 柔和的森林绿 (用于 INFO 级别)
+          blue: '#4078F2',                // 明亮的标识蓝 (用于 User ID)
+          cyan: '#008C9E',                // 深青色 (用于 Service Name)
+          magenta: '#A626A4',             // 鲜艳的结构紫 (用于 Group/Client ID)
+          brightBlack: '#AAAAAA',         // 中灰 (用于 Timestamp/Dim) 
       }
   };
   
@@ -221,17 +230,16 @@
   let pollingTimeout: number | null = null; 
   let debounceTimeout: number | null = null;
   
-  // 过滤状态
   const currentFilterMode = ref<FilterMode>('ALL');
   const levelFilter = ref<string | null>(null); 
   const groupIdFilter = ref('');
   const clientIdFilter = ref('');
   
-  // 锁与滚动状态
   const isWritingToTerminal = ref(false);
-  const isTerminalAtBottom = ref(true); // [新增] 追踪是否在底部
+  const isTerminalAtBottom = ref(true); 
+  const horizontalScrollOffset = ref(0); 
   
-  // === 计算属性 ===
+  // === 计算属性 (保持不变) ===
   const maxSliderValue = computed(() => Math.max(0, store.filteredCount - TERMINAL_SIZE));
   const isSliderNeeded = computed(() => maxSliderValue.value > 0); 
   const isLiveMode = computed(() => { return viewportStart.value >= maxSliderValue.value - 1; });
@@ -268,6 +276,43 @@
   });
   
   // === Xterm 逻辑 ===
+  
+  // 滚轮监听器：专用于快速捕捉用户向上滚动意图 (UNLOCK)
+  const wheelListener = (e: WheelEvent) => {
+      if (e.deltaY < 0) {
+          if (isLiveMode.value && autoScroll.value) {
+              autoScroll.value = false;
+          }
+      }
+  };
+  
+  // DOM Scroll 监听器：专用于快速捕捉用户滚动到底部的意图 (RE-LOCK) 或离开底部的意图 (UNLOCK)
+  const domScrollListener = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (!target || !isLiveMode.value) return;
+  
+      // 检查是否滚动到底部。
+      const isAtBottomDOM = target.scrollHeight - target.scrollTop <= target.clientHeight + 3; 
+  
+      // 1. Re-Lock Logic (用户滚到底部时，如果未锁定，则锁定)
+      if (isAtBottomDOM && !autoScroll.value) {
+          autoScroll.value = true;
+      } 
+      
+      // 2. UNLOCK 逻辑 (用户离开了底部，且当前处于锁定状态，则取消锁定)
+      else if (!isAtBottomDOM && autoScroll.value) {
+          autoScroll.value = false;
+      }
+  };
+  
+  // 横向滚动监听器 (保持不变)
+  const horizontalScrollListener = (e: Event) => {
+      const target = e.target as HTMLElement;
+      if (target) {
+          horizontalScrollOffset.value = -target.scrollLeft; 
+      }
+  };
+  
   const initTerminal = () => {
       if (!terminalRef.value) return;
       term = new Terminal(LOG_TERMINAL_CONFIG);
@@ -277,6 +322,7 @@
       term.open(terminalRef.value);
       fitAddon.fit();
       
+      // 纵向滚动监听器 (用于处理 Xterm 内部的 baseY/viewportY 计算和状态更新)
       term.onScroll(() => {
           if (!term || !isLiveMode.value) return; 
           
@@ -284,46 +330,23 @@
           const viewportScroll = term.buffer.active.viewportY;
           const isAtBottom = viewportScroll >= baseScroll - SCROLL_THRESHOLD;
           
-          // 实时更新底部状态供按钮使用
           isTerminalAtBottom.value = isAtBottom;
   
-          // 1. 到底部 -> 强制锁定
-          if (isAtBottom && !autoScroll.value) {
-              autoScroll.value = true;
-              return;
-          } 
-          
-          // 2. 写入锁检查
-          if (isWritingToTerminal.value) return;
-  
-          // 3. 离开底部 -> 取消锁定
+          // 离开底部，如果未通过 wheelListener/domScrollListener 触发，则在这里解锁
           if (!isAtBottom && autoScroll.value) {
               autoScroll.value = false;
           }
       });
-      
-      const terminalDom = term.element;
-      if (terminalDom) {
-          wheelListener = (e: WheelEvent) => {
-              if (isLiveMode.value) {
-                  if (e.deltaY < 0 && autoScroll.value) {
-                      autoScroll.value = false;
-                  }
-                  else if (e.deltaY > 0 && !autoScroll.value && term) {
-                      const base = term.buffer.active.baseY;
-                      const view = term.buffer.active.viewportY;
-                      if (view + 1 >= base) {
-                          autoScroll.value = true;
-                          isTerminalAtBottom.value = true;
-                      }
-                  }
-              }
-          };
-          terminalDom.addEventListener('wheel', wheelListener);
+  
+      // 监听 DOM 元素
+      viewportElement = terminalRef.value.querySelector('.xterm-viewport');
+      if (viewportElement) {
+          viewportElement.addEventListener('scroll', horizontalScrollListener);
+          // 注册 DOM scroll 监听器
+          viewportElement.addEventListener('scroll', domScrollListener); 
       }
   };
   
-  // [新增] 手动滚动到底部
   const scrollToBottom = () => {
       if (!term) return;
       term.scrollToBottom(); 
@@ -334,6 +357,7 @@
   const renderWindow = () => {
       if (!term) return;
       const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+      
       isWritingToTerminal.value = true;
       term.clear();
       const separator = '-'.repeat(term.cols);
@@ -344,7 +368,6 @@
           term.scrollToBottom();
           isTerminalAtBottom.value = true;
       } else if (isLiveMode.value) {
-          // 处于 Live Mode 但未锁定底部 (例如向上滚动了)，需要检查实际位置
           const base = term.buffer.active.baseY;
           const view = term.buffer.active.viewportY;
           isTerminalAtBottom.value = (view >= base - SCROLL_THRESHOLD);
@@ -360,7 +383,7 @@
     renderWindow(); 
   };
   
-  // === 交互处理 ===
+  // === 交互处理 (保持不变) ===
   const handleUserFilterToggle = () => {
       if (isUserFiltered.value) {
           store.setUserIdFilter(null);
@@ -391,7 +414,7 @@
   
   
   const loadMoreHistory = async () => {
-      if (!store.hasMoreHistory) return;
+      if (!store.hasMoreHistory) return 0;
       const logs = store.filteredLogs;
       const currentAnchorId = logs.length > 0 && viewportStart.value < logs.length ? logs[viewportStart.value].id : null;
       const logsAddedCount = await store.fetchOlderLogs();
@@ -426,7 +449,6 @@
   const runCycle = async () => {
       if (isCacheOverflowingInHistoryMode.value) {
           if (isPolling.value) {
-              console.warn("Cache overflow. Pausing.");
               stopPolling(true); 
           }
           return; 
@@ -438,27 +460,18 @@
       if (wasInLiveMode) {
           viewportStart.value = maxSliderValue.value; 
           if (!store.isPollingError && newLogs.length > 0) {
-              // 重新计算要渲染的项 (简化逻辑：直接使用 filterMode)
-              const itemsToRender = newLogs.filter(item => {
-                  const mode = store.filterMode;
-                  if (mode === 'NONE') return true;
-                  let match = true;
-                  if (mode === 'ALL') {
-                      if (store.userIdFilter && item.userId !== store.userIdFilter) match = false;
-                      if (store.levelFilter && item.level !== store.levelFilter) match = false;
-                      if (store.groupIdFilter && !item.groupId.includes(store.groupIdFilter)) match = false;
-                      if (store.clientIdFilter && !item.clientId.includes(store.clientIdFilter)) match = false;
-                  } else if (mode === 'LEVEL') {
-                      if (store.levelFilter && item.level !== store.levelFilter) match = false;
-                  } else if (mode === 'GROUP_ID') {
-                      if (store.groupIdFilter && !item.groupId.includes(store.groupIdFilter)) match = false;
-                  } else if (mode === 'CLIENT_ID') {
-                      if (store.clientIdFilter && !item.clientId.includes(store.clientIdFilter)) match = false;
-                  } else if (mode === 'USER_ID') {
-                      if (store.userIdFilter && item.userId !== store.userIdFilter) match = false;
-                  }
-                  return match;
-              });
+              
+              // 使用通用的 shouldLogBeDisplayed 函数进行过滤
+              const itemsToRender = newLogs.filter(item => 
+                  shouldLogBeDisplayed(
+                      item, 
+                      store.filterMode, 
+                      store.levelFilter, 
+                      store.groupIdFilter, 
+                      store.clientIdFilter, 
+                      store.userIdFilter
+                  )
+              );
   
               isWritingToTerminal.value = true;
               itemsToRender.forEach(item => term?.writeln(item.formattedMsg));
@@ -476,21 +489,29 @@
   };
   
   const startPolling = () => {
-      if (pollingTimeout) return;
-      isPolling.value = true;
-      returnToLiveMode(); 
-      store.resetRetryState(); 
-      runCycle(); 
-  };
-  
+    if (pollingTimeout) return;
+    isPolling.value = true;
+    store.resetRetryState(); 
+
+    // 1. 跳转到最新视图 (设置 autoScroll=true, viewportStart=max, 触发 renderWindow)
+    returnToLiveMode(); 
+    
+    // 2. 【关键修复】引入 50ms 延迟，确保 Xterm 终端内容完成绘制，避免时序冲突。
+    setTimeout(() => {
+        // 强制锁定并滚动到底部，保证锁定状态的持久性。
+        scrollToBottom(); 
+        
+        // 3. 在滚动完成后，再启动轮询周期。
+        runCycle(); 
+    }, 50); // 50ms 延迟
+};
+
   const stopPolling = (isAutomaticPause: boolean = false) => { 
       if (pollingTimeout) clearTimeout(pollingTimeout); 
       pollingTimeout = null; 
       isPolling.value = false;
       if (!isAutomaticPause) store.resetRetryState();
   };
-  
-  const togglePolling = () => isPolling.value ? stopPolling() : startPolling();
   
   const onResize = () => {
     fitAddon?.fit();
@@ -509,53 +530,65 @@
     initTerminal();
     startPolling(); 
     window.addEventListener('resize', onResize);
+    
+    // 注册 wheelListener
+    if (terminalRef.value) {
+      terminalRef.value.addEventListener('wheel', wheelListener, { passive: true });
+    }
   });
   
   onUnmounted(() => {
     if (pollingTimeout) clearTimeout(pollingTimeout); 
     window.removeEventListener('resize', onResize);
-    if (term && term.element && wheelListener) {
-        term.element.removeEventListener('wheel', wheelListener as EventListener);
+  
+    // 移除 wheelListener
+    if (terminalRef.value) {
+      terminalRef.value.removeEventListener('wheel', wheelListener);
+    }
+  
+    // 移除 DOM 监听器
+    if (viewportElement) {
+        viewportElement.removeEventListener('scroll', horizontalScrollListener);
+        viewportElement.removeEventListener('scroll', domScrollListener);
     }
     term?.dispose();
   });
   </script>
   
   <style scoped>
+  /* ---------------- 基础样式 - 采用柔和的浅色调 ---------------- */
   .terminal-wrapper { 
       display: flex; flex-direction: column; width: 100%; height: 600px; 
-      background-color: #F5F5F5; 
+      background-color: #F7F7F7; /* 略微深于终端背景 */
       border-radius: 8px; overflow: hidden; 
-      border: 1px solid #E0E0E0; 
+      border: 1px solid #EAEAEA; 
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
-  
-  /* ---------------- 控制栏布局 ---------------- */
   .control-bar {
       display: flex; 
       flex-direction: column; 
       gap: 8px;
-      padding: 8px 12px; 
-      background-color: #E8E8E8; 
-      border-bottom: 1px solid #E0E0E0; 
+      padding: 10px 15px; 
+      background-color: #FFFFFF; /* 纯白背景 */
+      border-bottom: 1px solid #EAEAEA; 
       user-select: none; 
-      color: #333333;
-      font-size: 12px;
+      color: #383A42; /* 柔和深色文本 */
+      font-size: 13px;
   }
   
   .filter-row {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
   }
   
   .action-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-top: 1px solid #DDD; 
-      padding-top: 6px;
+      border-top: 1px solid #EAEAEA; /* 柔和分割线 */
+      padding-top: 8px;
   }
   
   .right-actions {
@@ -564,91 +597,155 @@
       gap: 8px;
   }
   
-  /* 输入控件 */
   .input-group { display: flex; align-items: center; gap: 4px; }
   .label { font-weight: 600; }
   
   .mode-select, .common-select, .common-input {
-      padding: 3px 6px;
-      border: 1px solid #CCCCCC;
-      border-radius: 4px;
+      padding: 4px 8px;
+      border: 1px solid #D0D0D0;
+      border-radius: 5px;
       background-color: #FFFFFF;
-      color: #333;
+      color: #383A42;
       font-size: 12px;
+      transition: border-color 0.2s;
   }
-  .mode-select { font-weight: bold; color: #0277BD; }
-  .common-input { width: 80px; }
+  .mode-select:focus, .common-select:focus, .common-input:focus {
+      border-color: #007ACC;
+      box-shadow: 0 0 0 1px #007ACC;
+  }
+  
+  .mode-select { font-weight: bold; color: #007ACC; }
+  .common-input { width: 90px; }
   .common-input:disabled, .common-select:disabled {
-      background-color: #E0E0E0;
+      background-color: #EEEEEE;
       color: #999;
       cursor: not-allowed;
+      border-color: #EAEAEA;
   }
   
   .checkbox-item { display: flex; align-items: center; gap: 4px; cursor: pointer; }
-  .filter-checkbox { color: #039BE5; font-weight: 500; }
-  .filter-checkbox.disabled { color: #999; cursor: not-allowed; }
+  .filter-checkbox { color: #007ACC; font-weight: 500; }
+  .filter-checkbox.disabled { color: #AAAAAA; cursor: not-allowed; }
   
-  /* 按钮 */
   button { cursor: pointer; border: none; outline: none; }
-  .btn-icon { background: transparent; font-size: 14px; padding: 4px; border-radius: 4px; color: #555; }
-  .btn-icon:hover { background-color: #D0D0D0; }
+  .btn-icon { background: transparent; font-size: 16px; padding: 4px; border-radius: 4px; color: #555; }
+  .btn-icon:hover { background-color: #EAEAEA; }
   
-  .btn-action { font-size: 12px; padding: 4px 12px; border-radius: 4px; color: white; font-weight: 500; }
-  .btn-action.start { background-color: #4CAF50; } 
-  .btn-action.permanent-error { background-color: #E53935; }
+  .btn-action { font-size: 12px; padding: 6px 14px; border-radius: 5px; color: white; font-weight: 500; }
+  .btn-action.start { background-color: #50A14F; } /* 终端 Green */
+  .btn-action.start:hover { background-color: #438e42; }
+  .btn-action.permanent-error { background-color: #E4564A; } /* 终端 Red */
+  .btn-action.permanent-error:hover { background-color: #c94c42; }
   
-  /* 头部信息 */
   .header { 
-      display: flex; align-items: center; padding: 6px 12px; 
-      background-color: #FFFFFF; border-bottom: 1px solid #E0E0E0; 
+      display: flex; align-items: center; padding: 6px 15px; 
+      background-color: #FFFFFF; border-bottom: 1px solid #EAEAEA; 
       font-size: 12px; gap: 10px;
+      color: #383A42;
   }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background-color: #999; transition: all 0.3s; }
-  .status-dot.live { background-color: #4CAF50; box-shadow: 0 0 6px rgba(76, 175, 80, 0.4); }
-  .status-dot.history { background-color: #FF9800; }
-  .status-dot.error { background-color: #E53935; animation: pulse 1s infinite; }
-  .status-dot.paused { background-color: #607D8B; }
+  .status-dot.live { background-color: #50A14F; box-shadow: 0 0 6px rgba(80, 161, 79, 0.4); } /* 终端 Green */
+  .status-dot.history { background-color: #9D7A00; } /* 终端 Yellow */
+  .status-dot.error { background-color: #E4564A; animation: pulse 1s infinite; } /* 终端 Red */
+  .status-dot.paused { background-color: #AAAAAA; } /* 终端 Bright Black */
   
   @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
   
   .title { font-weight: 600; }
   .meta-info { color: #666; margin-left: auto; }
-  .log-gap-warning { color: #E53935; margin-left: 8px; }
+  .log-gap-warning { color: #E4564A; margin-left: 8px; font-weight: 500; }
   .resume-hint { color: #666; font-style: italic; font-size: 11px; }
   
-  /* 时间轴 */
-  .timeline-bar { display: flex; align-items: center; gap: 8px; padding: 4px 12px; background: #EEEEEE; border-bottom: 1px solid #E0E0E0; font-size: 11px; }
+  .timeline-bar { display: flex; align-items: center; gap: 8px; padding: 4px 15px; background: #EEEEEE; border-bottom: 1px solid #EAEAEA; font-size: 12px; color: #666; }
   .history-slider { flex: 1; cursor: pointer; height: 4px; }
   .slider-placeholder { flex: 1; height: 4px; border-radius: 2px; background-color: #DDD; }
-  .btn-load-history { background-color: #42A5F5; color: white; padding: 2px 6px; border-radius: 3px; }
+  .btn-load-history { 
+      background-color: #007ACC; /* 强调蓝 */ 
+      color: white; 
+      padding: 2px 8px; 
+      border-radius: 3px; 
+      font-size: 11px;
+      transition: background-color 0.2s;
+  }
+  .btn-load-history:hover { background-color: #0069b3; }
   
-  /* 列头 & 终端 */
-  .column-header { display: flex; background-color: #F5F5F5; border-top: 1px solid #E0E0E0; font-family: monospace; font-size: 12px; padding: 2px 0 2px 8px; font-weight: bold; color: #555; }
-  .column-header > span { display: inline-block; padding-right: 1ch; }
-  .col-timestamp { min-width: 10ch; } 
-  .col-service { min-width: 12ch; color: #8959A8; } 
-  .col-user { min-width: 10ch; color: #4271AE; } 
-  .col-group { min-width: 14ch; color: #009688; } 
-  .col-level { min-width: 6ch; } 
-  .col-message { flex-grow: 1; color: #333; }
-  
-  .term-box { flex: 1; position: relative; overflow: hidden; padding-left: 8px; background-color: #FFFFFF; }
+  .term-box { flex: 1; position: relative; overflow: hidden; padding-left: 8px; background-color: #FAFAFA; } /* 终端背景 */
   .xterm-container { width: 100%; height: 100%; }
   
-  .resume-btn { 
-    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); 
-    background-color: #FFA000; color: #333; padding: 6px 16px; border-radius: 20px; 
-    font-size: 12px; font-weight: bold; box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 10; 
+  
+  /* ---------------- ✨ 漂亮的滚动条样式 ✨ (不变) ---------------- */
+  
+  /* 1. Webkit/Blink 样式 (Chrome, Safari, Edge) */
+  .xterm-container ::-webkit-scrollbar {
+      width: 8px; 
+      height: 8px; 
   }
   
-  /* [新增] 滚动到底部按钮样式 */
+  .xterm-container ::-webkit-scrollbar-track {
+      background: transparent; 
+  }
+  
+  .xterm-container ::-webkit-scrollbar-thumb {
+      background-color: #B0B0B0; 
+      border-radius: 4px; 
+      border: 2px solid transparent; 
+  }
+  
+  .xterm-container ::-webkit-scrollbar-thumb:hover {
+      background-color: #888888; 
+  }
+  
+  /* 2. Firefox 样式 */
+  .xterm-container {
+      scrollbar-width: thin; 
+      scrollbar-color: #B0B0B0 transparent; 
+  }
+  
+  /* ---------------- 列头同步样式 (保持不变) ---------------- */
+  
+  .column-header-wrapper {
+      position: relative; 
+      z-index: 5;
+      background-color: #F7F7F7; /* 匹配 wrapper 背景 */
+      transition: transform 0.05s linear; 
+      border-top: 1px solid #EAEAEA; 
+  }
+  
+  .column-header { 
+      display: flex; 
+      font-family: monospace; 
+      font-size: 12px; 
+      padding: 2px 0 2px 8px; 
+      font-weight: bold; 
+      color: #555; 
+  }
+  
+  /* 列宽定义 */
+  .column-header > span { display: inline-block; padding-right: 1ch; }
+  .col-timestamp { min-width: 10ch; } 
+  .col-service { min-width: 12ch; color: #008C9E; } /* 终端 Cyan */
+  .col-user { min-width: 10ch; color: #4078F2; } /* 终端 Blue */
+  .col-group { min-width: 14ch; color: #A626A4; } /* 终端 Magenta */
+  .col-level { min-width: 6ch; } 
+  .col-message { flex-grow: 1; color: #383A42; } 
+  
+  /* 底部按钮样式 (更新为新主题颜色) */
+  .resume-btn { 
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); 
+    background-color: #9D7A00; /* 终端 Yellow/Gold */ 
+    color: #FAFAFA; 
+    padding: 6px 16px; border-radius: 20px; 
+    font-size: 12px; font-weight: bold; box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 10; 
+    cursor: pointer;
+  }
   .scroll-bottom-btn {
     position: absolute; bottom: 20px; right: 20px; 
-    background-color: #42A5F5; color: white; padding: 6px 12px; border-radius: 20px;
+    background-color: #007ACC; /* 强调蓝 */ 
+    color: white; padding: 6px 12px; border-radius: 20px;
     font-size: 12px; font-weight: bold; box-shadow: 0 2px 8px rgba(0,0,0,0.2); cursor: pointer; z-index: 10;
     transition: background 0.2s;
   }
-  .scroll-bottom-btn:hover { background-color: #1E88E5; }
+  .scroll-bottom-btn:hover { background-color: #0069b3; }
   
   .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }
   .fade-enter-from, .fade-leave-to { opacity: 0; }
