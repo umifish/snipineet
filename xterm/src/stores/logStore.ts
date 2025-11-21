@@ -113,10 +113,12 @@ export const shouldLogBeDisplayed = (
 /**
  * 高效地将新日志插入到缓存中，采用局部排序和切片替换机制。
  * 【修复】确保合并后的日志有序且唯一（基于 ID 去重）。
+ * 【性能优化】同时更新 ID Set，避免每次去重时都遍历整个数组。
  * @param cache 缓存日志数组 (ref)
+ * @param idSet ID Set (ref)，用于快速去重检查
  * @param newLogs 经过去重且已排序的新日志数组
  */
-const insertLogsOrdered = (cache: Ref<LogItem[]>, newLogs: LogItem[]): void => {
+const insertLogsOrdered = (cache: Ref<LogItem[]>, idSet: Ref<Set<number>>, newLogs: LogItem[]): void => {
     if (newLogs.length === 0) return;
 
     const cacheArray = cache.value;
@@ -156,6 +158,12 @@ const insertLogsOrdered = (cache: Ref<LogItem[]>, newLogs: LogItem[]): void => {
 
     // 4. 使用 splice 替换缓存中的旧片段
     const oldSegmentLength = endIdx - startIdx;
+    const removedLogs = cacheArray.slice(startIdx, startIdx + oldSegmentLength);
+    
+    // 【性能优化】更新 ID Set：移除被替换的日志 ID，添加新插入的日志 ID
+    removedLogs.forEach(log => idSet.value.delete(log.id));
+    uniqueMergedLogs.forEach(log => idSet.value.add(log.id));
+    
     cacheArray.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs);
     
     // 【可选】验证最终结果（可通过导出函数手动调用完整验证）
@@ -393,10 +401,31 @@ export const useLogStore = defineStore('logTerminal', () => {
     const retryCount = ref(0);
     const isFetchingHistory = ref(false);
 
+    // 【性能优化】维护一个 ID Set，避免每次去重时都遍历整个数组
+    const logIdSet = ref<Set<number>>(new Set(initialLogs.map(log => log.id)));
 
     // === 计算属性 Getters ===
     
+    // 【性能优化】filteredLogs 使用 computed，Vue 会自动缓存，只在依赖变化时重新计算
     const filteredLogs = computed(() => {
+        // 如果没有任何过滤条件，直接返回 allLogs（避免不必要的过滤）
+        if (filterMode.value === 'NONE') {
+            return allLogs.value;
+        }
+        
+        // 检查是否有任何有效的过滤条件
+        const hasActiveFilter = 
+            (filterMode.value === 'ALL' || filterMode.value === 'LEVEL') && levelFilter.value !== null ||
+            (filterMode.value === 'ALL' || filterMode.value === 'GROUP_ID') && groupIdFilter.value !== null && groupIdFilter.value.length > 0 ||
+            (filterMode.value === 'ALL' || filterMode.value === 'CLIENT_ID') && clientIdFilter.value !== null && clientIdFilter.value.length > 0 ||
+            (filterMode.value === 'ALL' || filterMode.value === 'USER_ID') && userIdFilter.value !== null;
+        
+        // 如果没有有效的过滤条件，直接返回 allLogs
+        if (!hasActiveFilter && filterMode.value === 'ALL') {
+            return allLogs.value;
+        }
+        
+        // 有过滤条件时才进行过滤
         return allLogs.value.filter(item => 
             shouldLogBeDisplayed(
                 item,
@@ -430,6 +459,7 @@ export const useLogStore = defineStore('logTerminal', () => {
     
     const clearAllLogs = () => {
         allLogs.value = [];
+        logIdSet.value.clear(); // 【性能优化】清空 ID Set
         oldestLogTimestamp.value = Date.now(); // 重置最旧时间戳
         lastPolledTimestamp.value = null; // 清除已轮询时间戳
     };
@@ -486,13 +516,12 @@ export const useLogStore = defineStore('logTerminal', () => {
         // 对去重后的日志进行排序
         uniqueOlderLogsInBatch.sort(logComparator);
         
-        // 与缓存中的日志去重
-        const existingIds = new Set(allLogs.value.map(log => log.id));
-        const uniqueOlderLogs = uniqueOlderLogsInBatch.filter(log => !existingIds.has(log.id));
+        // 【性能优化】与缓存中的日志去重，使用维护的 logIdSet 而不是每次都创建新的 Set
+        const uniqueOlderLogs = uniqueOlderLogsInBatch.filter(log => !logIdSet.value.has(log.id));
 
         if (uniqueOlderLogs.length > 0) {
             // 3. 局部插入和排序：处理旧日志与现有缓存开头的交错
-            insertLogsOrdered(allLogs, uniqueOlderLogs);
+            insertLogsOrdered(allLogs, logIdSet, uniqueOlderLogs);
             
             // 4. 【更新】溢出处理：如果插入后超过上限，从最新端移除，并记录截断位置的时间戳
             if (allLogs.value.length > MAX_CACHE_SIZE) {
@@ -507,7 +536,9 @@ export const useLogStore = defineStore('logTerminal', () => {
                     }
                 }
                 
-                // 从最新的日志（末尾）开始移除
+                // 【性能优化】从最新的日志（末尾）开始移除，同时更新 ID Set
+                const removedLogs = allLogs.value.slice(MAX_CACHE_SIZE);
+                removedLogs.forEach(log => logIdSet.value.delete(log.id));
                 allLogs.value.splice(MAX_CACHE_SIZE, logsToRemove); 
                 console.warn(`加载历史日志后缓存溢出，已移除 ${logsToRemove} 条最新日志。截断位置时间戳: ${lastPolledTimestamp.value}`);
             }
@@ -584,13 +615,12 @@ export const useLogStore = defineStore('logTerminal', () => {
             // 对去重后的日志进行排序
             uniqueFetchedLogsInBatch.sort(logComparator);
             
-            // 与缓存中的日志去重
-            const existingIds = new Set(allLogs.value.map(log => log.id));
-            uniqueNewLogs = uniqueFetchedLogsInBatch.filter(log => !existingIds.has(log.id));
+            // 【性能优化】与缓存中的日志去重，使用维护的 logIdSet 而不是每次都创建新的 Set
+            uniqueNewLogs = uniqueFetchedLogsInBatch.filter(log => !logIdSet.value.has(log.id));
 
             if (uniqueNewLogs.length > 0) {
                 // 1. 局部插入和排序：处理新日志与现有缓存末尾的交错
-                insertLogsOrdered(allLogs, uniqueNewLogs);
+                insertLogsOrdered(allLogs, logIdSet, uniqueNewLogs);
                 
                 // 2. 【更新】更新已轮询到的最新时间戳（使用本次获取的最新日志的时间戳）
                 // 【修复】确保数组不为空
@@ -636,7 +666,10 @@ export const useLogStore = defineStore('logTerminal', () => {
             // 2. 【溢出处理：从最旧端移除】
             if (allLogs.value.length > MAX_CACHE_SIZE) {
                 const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
-                allLogs.value.splice(0, logsToRemove); // 从最旧的日志（开头）开始移除
+                // 【性能优化】从最旧的日志（开头）开始移除，同时更新 ID Set
+                const removedLogs = allLogs.value.slice(0, logsToRemove);
+                removedLogs.forEach(log => logIdSet.value.delete(log.id));
+                allLogs.value.splice(0, logsToRemove);
                 
                 // 3. 【更新历史游标】
                 if (allLogs.value.length > 0) {
