@@ -153,7 +153,7 @@ function mockFetchOlderLogs(beforeTimestamp: number): {
 }
 
 // --- Pinia Store 定义 ---
-export const useLogStore = defineStore("logStorexxxx", () => {
+export const useLogStore = defineStore("logStorexxxxxx", () => {
   // 使用 Map 进行存储
   const logsMap = ref(new Map<string, LogItem>());
 
