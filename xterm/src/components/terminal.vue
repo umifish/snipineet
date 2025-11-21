@@ -492,7 +492,7 @@
     if (pollingTimeout) return;
     isPolling.value = true;
     store.resetRetryState(); 
-
+  
     // 1. 跳转到最新视图 (设置 autoScroll=true, viewportStart=max, 触发 renderWindow)
     returnToLiveMode(); 
     
@@ -504,8 +504,8 @@
         // 3. 在滚动完成后，再启动轮询周期。
         runCycle(); 
     }, 50); // 50ms 延迟
-};
-
+  };
+  
   const stopPolling = (isAutomaticPause: boolean = false) => { 
       if (pollingTimeout) clearTimeout(pollingTimeout); 
       pollingTimeout = null; 
