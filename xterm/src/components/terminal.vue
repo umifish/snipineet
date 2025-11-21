@@ -187,14 +187,14 @@
   import { FitAddon } from 'xterm-addon-fit';
   import '@xterm/xterm/css/xterm.css';
   import { useLogStore, MAX_CACHE_SIZE, type FilterMode, shouldLogBeDisplayed } from '../stores/logStore';
-  
+
   const store = useLogStore();
   
-  const terminalRef = ref<HTMLElement | null>(null);
-  let term: Terminal | null = null;
-  let fitAddon: FitAddon | null = null;
+const terminalRef = ref<HTMLElement | null>(null);
+let term: Terminal | null = null;
+let fitAddon: FitAddon | null = null;
   let viewportElement: HTMLElement | null = null;
-  
+
   const TERMINAL_SIZE = 2000;
   const CURRENT_USER = 'admin'; 
   const SCROLL_THRESHOLD = 3; 
@@ -202,7 +202,7 @@
   // ✨ 终端配置采用新的漂亮浅色主题 ✨
   const LOG_TERMINAL_CONFIG = {
       scrollback: TERMINAL_SIZE,           
-      disableStdin: true,           
+  disableStdin: true,
       convertEol: true,             
       rendererType: 'canvas',
       fontSize: 12,
@@ -274,6 +274,17 @@
       if (isCacheOverflowingInHistoryMode.value) return '已暂停';
       return '已暂停';
   });
+  
+  // === 辅助函数：确保 viewportStart 在有效范围内 ===
+  const clampViewportStart = () => {
+      const maxVal = maxSliderValue.value;
+      if (viewportStart.value > maxVal) {
+          viewportStart.value = maxVal;
+      }
+      if (viewportStart.value < 0) {
+          viewportStart.value = 0;
+      }
+  };
   
   // === Xterm 逻辑 ===
   
@@ -356,6 +367,10 @@
   
   const renderWindow = () => {
       if (!term) return;
+      
+      // 【修复】确保 viewportStart 在有效范围内
+      clampViewportStart();
+      
       const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
       
       isWritingToTerminal.value = true;
@@ -365,7 +380,7 @@
       logsToRender.forEach(item => term?.writeln(item.formattedMsg));
       
       if (isLiveMode.value && autoScroll.value) {
-          term.scrollToBottom();
+        term.scrollToBottom(); 
           isTerminalAtBottom.value = true;
       } else if (isLiveMode.value) {
           const base = term.buffer.active.baseY;
@@ -377,7 +392,9 @@
   };
   
   const returnToLiveMode = () => {
+    // 【修复】确保 viewportStart 设置为最新位置
     viewportStart.value = maxSliderValue.value;
+    clampViewportStart(); // 确保在有效范围内
     autoScroll.value = true;
     isTerminalAtBottom.value = true;
     renderWindow(); 
@@ -414,24 +431,44 @@
   
   
   const loadMoreHistory = async () => {
-      if (!store.hasMoreHistory) return 0;
+      if (!store.hasMoreHistory || store.isFetchingHistory) return 0;
+      
+      // 【修复】记录当前视窗顶部的日志 ID 作为锚点
       const logs = store.filteredLogs;
-      const currentAnchorId = logs.length > 0 && viewportStart.value < logs.length ? logs[viewportStart.value].id : null;
+      const currentAnchorId = logs.length > 0 && viewportStart.value < logs.length 
+          ? logs[viewportStart.value].id 
+          : null;
+      
       const logsAddedCount = await store.fetchOlderLogs();
+      
       if (logsAddedCount > 0) {
           const newLogs = store.filteredLogs;
+          
+          // 【修复】根据锚点重新计算 viewportStart
           if (currentAnchorId) {
               const newAnchorIndex = newLogs.findIndex(log => log.id === currentAnchorId);
-              viewportStart.value = newAnchorIndex !== -1 ? newAnchorIndex : logsAddedCount;
+              if (newAnchorIndex !== -1) {
+                  // 找到锚点，保持在同一位置
+                  viewportStart.value = newAnchorIndex;
+              } else {
+                  // 锚点丢失（可能被过滤掉了），使用添加的数量作为偏移
+                  viewportStart.value = Math.min(logsAddedCount, maxSliderValue.value);
+              }
           } else {
-               viewportStart.value = 0; 
+              // 没有锚点，保持在顶部
+              viewportStart.value = 0; 
           }
+          
+          // 【修复】确保 viewportStart 在有效范围内
+          clampViewportStart();
           renderWindow();
-      }
+    }
   };
   
   const handleSliderInteraction = () => {
+    // 【修复】拖动滑块时取消自动锁定，并确保 viewportStart 在有效范围内
     autoScroll.value = false;
+    clampViewportStart();
   };
   
   const clearView = () => {
@@ -479,7 +516,7 @@
               if (autoScroll.value) {
                   term.scrollToBottom();
                   isTerminalAtBottom.value = true;
-              }
+    }
               setTimeout(() => { isWritingToTerminal.value = false; }, 0);
           }
       } 
@@ -525,10 +562,43 @@
   watch(isLiveMode, (isLive) => {
       if (isLive && !isPolling.value) startPolling();
   });
+
+  // 【修复】监听 filteredCount 变化，当缓存被截断时自动调整 viewportStart
+  watch(() => store.filteredCount, (newCount, oldCount) => {
+      // 如果 filteredCount 减少（可能是缓存被截断了），需要调整 viewportStart
+      if (oldCount !== undefined && newCount < oldCount) {
+          const removedCount = oldCount - newCount;
+          
+          // 如果当前不在 Live Mode，需要调整 viewportStart
+          if (!isLiveMode.value) {
+              // viewportStart 应该减少相同的数量，但不能小于 0
+              viewportStart.value = Math.max(0, viewportStart.value - removedCount);
+          } else {
+              // Live Mode 下，直接调整到最新的位置
+              viewportStart.value = maxSliderValue.value;
+          }
+          
+          clampViewportStart();
+          // 如果 viewportStart 发生了变化，需要重新渲染
+          if (viewportStart.value !== maxSliderValue.value || !isLiveMode.value) {
+              renderWindow();
+          }
+      }
+  });
+
+  // 【修复】监听 maxSliderValue 变化，确保 viewportStart 不超过最大值
+  watch(maxSliderValue, (newMax) => {
+      if (viewportStart.value > newMax) {
+          viewportStart.value = newMax;
+          if (!isLiveMode.value) {
+              renderWindow();
+          }
+      }
+  });
   
   onMounted(() => {
     initTerminal();
-    startPolling(); 
+    startPolling();
     window.addEventListener('resize', onResize);
     
     // 注册 wheelListener
@@ -557,7 +627,7 @@
   
   <style scoped>
   /* ---------------- 基础样式 - 采用柔和的浅色调 ---------------- */
-  .terminal-wrapper { 
+  .terminal-wrapper {
       display: flex; flex-direction: column; width: 100%; height: 600px; 
       background-color: #F7F7F7; /* 略微深于终端背景 */
       border-radius: 8px; overflow: hidden; 
@@ -565,8 +635,8 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
   .control-bar {
-      display: flex; 
-      flex-direction: column; 
+    display: flex;
+    flex-direction: column;
       gap: 8px;
       padding: 10px 15px; 
       background-color: #FFFFFF; /* 纯白背景 */
@@ -584,8 +654,8 @@
   }
   
   .action-row {
-      display: flex;
-      justify-content: space-between;
+    display: flex;
+    justify-content: space-between;
       align-items: center;
       border-top: 1px solid #EAEAEA; /* 柔和分割线 */
       padding-top: 8px;
@@ -661,7 +731,7 @@
   .slider-placeholder { flex: 1; height: 4px; border-radius: 2px; background-color: #DDD; }
   .btn-load-history { 
       background-color: #007ACC; /* 强调蓝 */ 
-      color: white; 
+    color: white;
       padding: 2px 8px; 
       border-radius: 3px; 
       font-size: 11px;
@@ -687,7 +757,7 @@
   
   .xterm-container ::-webkit-scrollbar-thumb {
       background-color: #B0B0B0; 
-      border-radius: 4px; 
+    border-radius: 4px;
       border: 2px solid transparent; 
   }
   

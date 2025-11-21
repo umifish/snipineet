@@ -39,7 +39,7 @@ const MOCK_CLIENTS = ['ClientX', 'ClientY', 'ClientZ'];
 
 /**
  * LogItem 比较函数：首先按时间戳升序，时间戳相同时按 sequence 升序。
- * 用于保持 logCache 的严格有序。
+ * 用于保持 allLogs 的严格有序。
  */
 export const logComparator = (a: LogItem, b: LogItem): number => {
     // 1. 按时间戳升序
@@ -112,6 +112,7 @@ export const shouldLogBeDisplayed = (
 
 /**
  * 高效地将新日志插入到缓存中，采用局部排序和切片替换机制。
+ * 【修复】确保合并后的日志有序且唯一（基于 ID 去重）。
  * @param cache 缓存日志数组 (ref)
  * @param newLogs 经过去重且已排序的新日志数组
  */
@@ -133,16 +134,66 @@ const insertLogsOrdered = (cache: Ref<LogItem[]>, newLogs: LogItem[]): void => {
         endIdx++;
     }
     
-    // 3. 截取、合并、排序重组
+    // 3. 截取、合并、去重、排序重组
     const overlappingOldLogs = cacheArray.slice(startIdx, endIdx);
     const mergedLogs = [...overlappingOldLogs, ...newLogs];
     
-    // 对这个小片段进行排序重组
-    mergedLogs.sort(logComparator);
+    // 【修复】去重：基于 ID 去重，保留第一个出现的日志（按排序顺序）
+    const seenIds = new Set<number>();
+    const uniqueMergedLogs: LogItem[] = [];
+    for (const log of mergedLogs) {
+        if (!seenIds.has(log.id)) {
+            seenIds.add(log.id);
+            uniqueMergedLogs.push(log);
+        } else {
+            // 发现重复 ID，记录警告（分布式场景下可能发生）
+            console.warn(`发现重复的日志 ID: ${log.id}, 时间戳: ${log.timestamp}, 已跳过`);
+        }
+    }
+    
+    // 对去重后的日志进行排序
+    uniqueMergedLogs.sort(logComparator);
 
     // 4. 使用 splice 替换缓存中的旧片段
     const oldSegmentLength = endIdx - startIdx;
-    cacheArray.splice(startIdx, oldSegmentLength, ...mergedLogs);
+    cacheArray.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs);
+    
+    // 【可选】验证最终结果（可通过导出函数手动调用完整验证）
+    // 注意：这里只做基本检查，完整验证请使用导出的 validateLogsOrderedAndUnique 函数
+};
+
+/**
+ * 【新增】验证日志数组是否有序且唯一
+ * @param logs 日志数组
+ * @returns 如果有序且唯一返回 true，否则返回 false
+ */
+const validateLogsOrderedAndUnique = (logs: LogItem[]): boolean => {
+    if (logs.length === 0) return true;
+    
+    const seenIds = new Set<number>();
+    
+    for (let i = 0; i < logs.length; i++) {
+        const log = logs[i];
+        
+        // 检查唯一性
+        if (seenIds.has(log.id)) {
+            console.error(`发现重复的日志 ID: ${log.id}，位置: ${i}`);
+            return false;
+        }
+        seenIds.add(log.id);
+        
+        // 检查有序性
+        if (i > 0) {
+            const prevLog = logs[i - 1];
+            const comparison = logComparator(prevLog, log);
+            if (comparison > 0) {
+                console.error(`日志顺序错误：位置 ${i-1} 的日志 (ID: ${prevLog.id}, ts: ${prevLog.timestamp}) 大于位置 ${i} 的日志 (ID: ${log.id}, ts: ${log.timestamp})`);
+                return false;
+            }
+        }
+    }
+    
+    return true;
 };
 
 /**
@@ -319,10 +370,16 @@ const pullOlderLogsMockAPI = (startTime: number, endTime: number, limit: number)
 export const useLogStore = defineStore('logTerminal', () => {
     // === 状态 State ===
     const initialLogs = generateMockLogs(500, MAX_MOCK_HISTORY_SIZE, Date.now() - 500 * 100).sort(logComparator);
-    const logCache = ref<LogItem[]>(initialLogs); 
+    const allLogs = ref<LogItem[]>(initialLogs); 
     
     // 【修改】用于跟踪历史加载的最旧时间戳
     const oldestLogTimestamp = ref(initialLogs.length > 0 ? initialLogs[0].timestamp : Date.now()); 
+    
+    // 【合并字段】记录轮询的起始/当前位置时间戳
+    // - 历史加载截断时：设置为截断位置的时间戳
+    // - 每次轮询后：更新为本次获取的最新日志的时间戳
+    // - 下次轮询时：从该时间戳继续，避免重复查询
+    const lastPolledTimestamp = ref<number | null>(null);
     
     // 过滤状态
     const filterMode = ref<FilterMode>('ALL');
@@ -340,7 +397,7 @@ export const useLogStore = defineStore('logTerminal', () => {
     // === 计算属性 Getters ===
     
     const filteredLogs = computed(() => {
-        return logCache.value.filter(item => 
+        return allLogs.value.filter(item => 
             shouldLogBeDisplayed(
                 item,
                 filterMode.value,
@@ -352,7 +409,7 @@ export const useLogStore = defineStore('logTerminal', () => {
         );
     });
 
-    const totalCount = computed(() => logCache.value.length);
+    const totalCount = computed(() => allLogs.value.length);
     const filteredCount = computed(() => filteredLogs.value.length);
 
     // 假设如果最旧时间戳低于 6 个月前，则认为没有更多历史
@@ -372,8 +429,16 @@ export const useLogStore = defineStore('logTerminal', () => {
     const resetRetryState = () => { isPollingError.value = false; retryCount.value = 0; };
     
     const clearAllLogs = () => {
-        logCache.value = [];
+        allLogs.value = [];
         oldestLogTimestamp.value = Date.now(); // 重置最旧时间戳
+        lastPolledTimestamp.value = null; // 清除已轮询时间戳
+    };
+    
+    /**
+     * 清除已轮询时间戳标记（恢复正常轮询，从缓存最新位置开始）
+     */
+    const clearLastPolledTimestamp = () => {
+        lastPolledTimestamp.value = null;
     };
 
 
@@ -387,7 +452,7 @@ export const useLogStore = defineStore('logTerminal', () => {
 
     /**
      * 【已更新】模拟加载更旧的历史日志。使用时间范围查询和局部排序。
-     * 溢出时从最新日志端 (末尾) 移除。
+     * 【重要更新】允许从最新端截断数据，但记录截断位置的时间戳，以便轮询时从截断位置继续。
      */
     const fetchOlderLogs = async (): Promise<number> => {
         if (!hasMoreHistory.value || isFetchingHistory.value) return 0;
@@ -396,7 +461,7 @@ export const useLogStore = defineStore('logTerminal', () => {
         await new Promise(resolve => setTimeout(resolve, 500)); 
 
         // 1. 确定查询范围
-        const { timestamp: endTime } = getOldestLogTimeAndSequence(logCache.value);
+        const { timestamp: endTime } = getOldestLogTimeAndSequence(allLogs.value);
         const startTime = endTime - HISTORY_TIME_STEP; // 往前推一个时间步长 (1小时)
         
         // 模拟 API 查询
@@ -406,24 +471,57 @@ export const useLogStore = defineStore('logTerminal', () => {
             HISTORY_LIMIT
         );
         
-        // 2. 去重 (ID是唯一的，用于区分缓存中已有的日志)
-        const existingIds = new Set(logCache.value.map(log => log.id));
-        const uniqueOlderLogs = olderLogs.filter(log => !existingIds.has(log.id));
+        // 2. 去重和排序
+        // 【修复】先对 olderLogs 内部去重（分布式场景下，同一批日志可能有重复 ID）
+        const seenIdsInBatch = new Set<number>();
+        const uniqueOlderLogsInBatch = olderLogs.filter(log => {
+            if (seenIdsInBatch.has(log.id)) {
+                console.warn(`历史日志批次中发现重复 ID: ${log.id}，已跳过`);
+                return false;
+            }
+            seenIdsInBatch.add(log.id);
+            return true;
+        });
+        
+        // 对去重后的日志进行排序
+        uniqueOlderLogsInBatch.sort(logComparator);
+        
+        // 与缓存中的日志去重
+        const existingIds = new Set(allLogs.value.map(log => log.id));
+        const uniqueOlderLogs = uniqueOlderLogsInBatch.filter(log => !existingIds.has(log.id));
 
         if (uniqueOlderLogs.length > 0) {
             // 3. 局部插入和排序：处理旧日志与现有缓存开头的交错
-            insertLogsOrdered(logCache, uniqueOlderLogs);
+            insertLogsOrdered(allLogs, uniqueOlderLogs);
             
-            // 4. 【溢出处理：从最新端移除】
-            if (logCache.value.length > MAX_CACHE_SIZE) {
-                const logsToRemove = logCache.value.length - MAX_CACHE_SIZE;
+            // 4. 【更新】溢出处理：如果插入后超过上限，从最新端移除，并记录截断位置的时间戳
+            if (allLogs.value.length > MAX_CACHE_SIZE) {
+                const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
+                
+                // 【修复】记录被截断位置的时间戳（截断前最新日志的时间戳），用于后续轮询从该位置继续
+                // 确保数组不为空且索引有效
+                if (allLogs.value.length > 0) {
+                    const lastLogBeforeTruncate = allLogs.value[allLogs.value.length - 1];
+                    if (lastLogBeforeTruncate) {
+                        lastPolledTimestamp.value = lastLogBeforeTruncate.timestamp;
+                    }
+                }
+                
                 // 从最新的日志（末尾）开始移除
-                logCache.value.splice(MAX_CACHE_SIZE, logsToRemove); 
+                allLogs.value.splice(MAX_CACHE_SIZE, logsToRemove); 
+                console.warn(`加载历史日志后缓存溢出，已移除 ${logsToRemove} 条最新日志。截断位置时间戳: ${lastPolledTimestamp.value}`);
             }
 
             // 5. 更新最旧时间戳
-            if (logCache.value.length > 0) {
-                 oldestLogTimestamp.value = logCache.value[0].timestamp;
+            if (allLogs.value.length > 0) {
+                 oldestLogTimestamp.value = allLogs.value[0].timestamp;
+                 
+                 // 【修复】确保 lastPolledTimestamp 不会小于 oldestLogTimestamp
+                 // 如果 lastPolledTimestamp 存在且小于 oldestLogTimestamp，说明逻辑错误
+                 if (lastPolledTimestamp.value !== null && lastPolledTimestamp.value < oldestLogTimestamp.value) {
+                     console.warn(`lastPolledTimestamp (${lastPolledTimestamp.value}) 小于 oldestLogTimestamp (${oldestLogTimestamp.value})，清除 lastPolledTimestamp`);
+                     lastPolledTimestamp.value = null;
+                 }
             }
         } else if (olderLogs.length < HISTORY_LIMIT) {
              // 如果 API 返回的日志少于限制，并且没有新的 unique 日志，可能已经加载到底了
@@ -441,6 +539,8 @@ export const useLogStore = defineStore('logTerminal', () => {
 
     /**
      * 【已更新】模拟轮询获取新日志。使用局部排序。
+     * 【重要更新】如果存在 lastPolledTimestamp，从该位置继续轮询，避免重复查询。
+     * 每次轮询后更新 lastPolledTimestamp 为本次获取的最新日志时间戳。
      * 溢出时从最旧日志端 (开头) 移除，并更新 oldestLogTimestamp。
      */
     const pullAndProcessLogs = async (): Promise<{ newLogs: LogItem[], nextDelay: number }> => {
@@ -454,35 +554,106 @@ export const useLogStore = defineStore('logTerminal', () => {
             
             await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100));
 
-            // 获取最新的时间戳作为查询起点
-            const { timestamp: sinceTimestamp } = getLatestLogTimeAndSequence(logCache.value);
+            // 【简化】获取查询起点：如果存在 lastPolledTimestamp，从该位置继续；否则从缓存最新位置开始
+            let sinceTimestamp: number;
+            if (lastPolledTimestamp.value !== null) {
+                // 从上次轮询的位置继续，避免重复查询
+                sinceTimestamp = lastPolledTimestamp.value;
+                console.log(`从上次轮询位置继续，时间戳: ${sinceTimestamp}`);
+            } else {
+                // 正常情况：从缓存最新位置开始
+                const latest = getLatestLogTimeAndSequence(allLogs.value);
+                sinceTimestamp = latest.timestamp;
+            }
             
             // 模拟 API 调用
             const fetchedLogs = pullNewLogsMockAPI(sinceTimestamp, POLLING_LIMIT);
             
-            // 去重
-            const existingIds = new Set(logCache.value.map(log => log.id));
-            uniqueNewLogs = fetchedLogs.filter(log => !existingIds.has(log.id));
+            // 【修复】去重和排序
+            // 先对 fetchedLogs 内部去重（分布式场景下，同一批日志可能有重复 ID）
+            const seenIdsInBatch = new Set<number>();
+            const uniqueFetchedLogsInBatch = fetchedLogs.filter(log => {
+                if (seenIdsInBatch.has(log.id)) {
+                    console.warn(`轮询日志批次中发现重复 ID: ${log.id}，已跳过`);
+                    return false;
+                }
+                seenIdsInBatch.add(log.id);
+                return true;
+            });
+            
+            // 对去重后的日志进行排序
+            uniqueFetchedLogsInBatch.sort(logComparator);
+            
+            // 与缓存中的日志去重
+            const existingIds = new Set(allLogs.value.map(log => log.id));
+            uniqueNewLogs = uniqueFetchedLogsInBatch.filter(log => !existingIds.has(log.id));
 
             if (uniqueNewLogs.length > 0) {
                 // 1. 局部插入和排序：处理新日志与现有缓存末尾的交错
-                insertLogsOrdered(logCache, uniqueNewLogs);
+                insertLogsOrdered(allLogs, uniqueNewLogs);
+                
+                // 2. 【更新】更新已轮询到的最新时间戳（使用本次获取的最新日志的时间戳）
+                // 【修复】确保数组不为空
+                if (uniqueNewLogs.length > 0) {
+                    const latestNewLog = uniqueNewLogs[uniqueNewLogs.length - 1];
+                    const previousPolledTimestamp = lastPolledTimestamp.value;
+                    lastPolledTimestamp.value = latestNewLog.timestamp;
+                    console.log(`轮询成功，更新已轮询时间戳: ${lastPolledTimestamp.value}`);
+                    
+                    // 3. 【检查】如果之前存在 lastPolledTimestamp（说明正在追回数据），
+                    // 且本次获取的日志时间戳已经接近当前时间（说明已经追回所有数据），
+                    // 可以清除 lastPolledTimestamp，恢复正常轮询（从缓存最新位置开始）
+                    if (previousPolledTimestamp !== null) {
+                        const now = Date.now();
+                        const timeDiff = now - lastPolledTimestamp.value;
+                        // 如果最新日志时间戳已经接近当前时间（差距小于轮询间隔的2倍），说明已经追回
+                        if (timeDiff < POLL_INTERVAL_BASE * 2) {
+                            console.log(`已追回所有数据，恢复正常轮询。最新日志时间戳: ${lastPolledTimestamp.value}, 当前时间: ${now}`);
+                            lastPolledTimestamp.value = null;
+                        }
+                    }
+                }
+            } else {
+                // 即使没有新日志，也要更新已轮询时间戳（避免重复查询相同的时间范围）
+                // 使用 API 返回的最新日志时间戳，如果没有则使用查询起点
+                if (fetchedLogs.length > 0) {
+                    const latestFetchedLog = fetchedLogs[fetchedLogs.length - 1];
+                    if (latestFetchedLog) {
+                        lastPolledTimestamp.value = latestFetchedLog.timestamp;
+                    } else {
+                        // 如果获取的日志无效，使用查询起点作为已轮询时间戳
+                        lastPolledTimestamp.value = sinceTimestamp;
+                    }
+                } else {
+                    // 如果没有返回任何日志，使用查询起点作为已轮询时间戳
+                    lastPolledTimestamp.value = sinceTimestamp;
+                }
             }
             
             isPollingError.value = false;
             retryCount.value = 0; 
 
             // 2. 【溢出处理：从最旧端移除】
-            if (logCache.value.length > MAX_CACHE_SIZE) {
-                const logsToRemove = logCache.value.length - MAX_CACHE_SIZE;
-                logCache.value.splice(0, logsToRemove); // 从最旧的日志（开头）开始移除
+            if (allLogs.value.length > MAX_CACHE_SIZE) {
+                const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
+                allLogs.value.splice(0, logsToRemove); // 从最旧的日志（开头）开始移除
                 
                 // 3. 【更新历史游标】
-                if (logCache.value.length > 0) {
+                if (allLogs.value.length > 0) {
                     // 更新 oldestLogTimestamp 为新的最旧日志的时间戳
-                    oldestLogTimestamp.value = logCache.value[0].timestamp;
+                    oldestLogTimestamp.value = allLogs.value[0].timestamp;
+                    
+                    // 【修复】确保 lastPolledTimestamp 不会小于 oldestLogTimestamp
+                    // 如果 lastPolledTimestamp 存在且小于新的 oldestLogTimestamp，说明它指向的日志已被移除
+                    // 应该清除它，恢复正常轮询
+                    if (lastPolledTimestamp.value !== null && lastPolledTimestamp.value < oldestLogTimestamp.value) {
+                        console.warn(`lastPolledTimestamp (${lastPolledTimestamp.value}) 小于 oldestLogTimestamp (${oldestLogTimestamp.value})，清除 lastPolledTimestamp`);
+                        lastPolledTimestamp.value = null;
+                    }
                 } else {
                      oldestLogTimestamp.value = Date.now(); // 缓存为空则重置
+                     // 缓存为空时，清除 lastPolledTimestamp
+                     lastPolledTimestamp.value = null;
                 }
             }
             
@@ -502,7 +673,7 @@ export const useLogStore = defineStore('logTerminal', () => {
      * 模拟导出所有日志为 JSON 或其他格式。
      */
     const exportAllLogs = () => {
-        const json = JSON.stringify(logCache.value, null, 2);
+        const json = JSON.stringify(allLogs.value, null, 2);
         const blob = new Blob([json], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -517,7 +688,7 @@ export const useLogStore = defineStore('logTerminal', () => {
 
     return {
         // State
-        logCache,
+        allLogs,
         filterMode,
         levelFilter,
         groupIdFilter,
@@ -526,6 +697,7 @@ export const useLogStore = defineStore('logTerminal', () => {
         isPollingError,
         retryCount,
         isFetchingHistory,
+        lastPolledTimestamp,
         
         // Getters
         totalCount,
@@ -541,9 +713,13 @@ export const useLogStore = defineStore('logTerminal', () => {
         setUserIdFilter,
         resetRetryState,
         clearAllLogs,
+        clearLastPolledTimestamp,
         fetchOlderLogs,
         pullAndProcessLogs,
         getLogSlice,
         exportAllLogs,
+        
+        // 【导出验证函数】用于验证日志的有序性和唯一性（开发/调试用）
+        validateLogsOrderedAndUnique: () => validateLogsOrderedAndUnique(allLogs.value),
     };
 });
