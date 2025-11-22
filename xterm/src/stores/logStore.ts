@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, type Ref } from 'vue'
-import { FilterMode, LogLevel, LogDataPacket } from './type'
+import { FilterMode, LogDataPacket } from './type'
+import { generateMockLogs, pullNewLogsMockAPI, pullOlderLogsMockAPI } from './mock'
 
 // ==== 以下为常量导出，保持向后兼容 ====
 import {
@@ -8,19 +9,9 @@ import {
   MAX_RETRY_COUNT,
   MAX_RETRY_DELAY,
   RETRY_JITTER_RATIO,
-  SENTINEL_POLL_INTERVAL,
-  SENTINEL_QUERY_LIMIT,
-  SENTINEL_TIME_WINDOW,
-  SENTINEL_COOLDOWN_INTERVAL,
-  SENTINEL_TIME_STEP,
   POLLING_LIMIT,
   HISTORY_LIMIT,
   HISTORY_TIME_STEP,
-  MAX_MOCK_HISTORY_SIZE,
-  MOCK_USERS,
-  MOCK_SERVICES,
-  MOCK_GROUPS,
-  MOCK_CLIENTS,
 } from '../components/config'
 
 // 重新导出常量，保持向后兼容
@@ -32,11 +23,18 @@ export { POLL_INTERVAL_BASE, MAX_RETRY_COUNT }
 // constants
 export const MAX_CACHE_SIZE = 10000; // 最大缓存日志数量
 
+// sentinel
+export const SENTINEL_POLL_INTERVAL = 3 // 哨兵轮询间隔：每 N 次主轮询执行一次哨兵轮询
+export const SENTINEL_QUERY_LIMIT = 200 // 哨兵每次查询的日志数量限制
+export const SENTINEL_TIME_WINDOW = 3600000 // 哨兵检查的时间窗口（毫秒），只检查最近时间窗口内的延迟日志
+export const SENTINEL_COOLDOWN_INTERVAL = 6 // 哨兵冷却间隔：完成一轮检查后，等待 N 次主轮询再重新启动
+export const SENTINEL_TIME_STEP = 300000 // 哨兵每次查询的时间步长（毫秒），每次往前检查的时间范围
+
 // insertion & sorting
 export type LogComparator = (a: LogDataPacket, b: LogDataPacket) => number
 
 export const logComparator: LogComparator = (a, b) => {
-  if (a.timestamp !== b.timestamp) {
+    if (a.timestamp !== b.timestamp) {
     return a.timestamp - b.timestamp
   }
 
@@ -47,7 +45,7 @@ export const findInsertionIndex = (log: LogDataPacket, logs: LogDataPacket[], co
   let high = logs.length
   let low = 0
 
-  while (low < high) {
+    while (low < high) {
     const mid = Math.floor((low + high) / 2)
 
     if (comparator(logs[mid], log) < 0) {
@@ -77,6 +75,27 @@ export const isUnEmptyString = (val: unknown) => {
   return !isNil(val) && `${val}` !== ''
 }
 
+export const hasActiveFilter = (mode: FilterMode, filterOptions?: FilterOptions): boolean => {
+  const { levelFilter, groupIdFilter, clientIdFilter, userIdFilter } = filterOptions || {}
+
+  switch (mode) {
+    case 'NONE':
+      return false
+    case 'ALL':
+      return isUnEmptyString(levelFilter) || isUnEmptyString(groupIdFilter) || isUnEmptyString(clientIdFilter) || isUnEmptyString(userIdFilter)
+    case 'LEVEL':
+      return isUnEmptyString(levelFilter)
+    case 'GROUP_ID':
+      return isUnEmptyString(groupIdFilter)
+    case 'CLIENT_ID':
+      return isUnEmptyString(clientIdFilter)
+    case 'USER_ID':
+      return isUnEmptyString(userIdFilter)
+    default:
+      return false
+  }
+}
+
 export const isLogVisible = (log: LogDataPacket, mode: FilterMode, filterOptions?: FilterOptions) => {
   const { levelFilter, groupIdFilter, clientIdFilter, userIdFilter } = filterOptions || {}
 
@@ -86,7 +105,7 @@ export const isLogVisible = (log: LogDataPacket, mode: FilterMode, filterOptions
 
   let isMatched = true
 
-  if (mode === 'ALL') {
+    if (mode === 'ALL') {
     if (isUnEmptyString(levelFilter) && log.logLevel !== levelFilter) {
       isMatched = false
     }
@@ -103,7 +122,7 @@ export const isLogVisible = (log: LogDataPacket, mode: FilterMode, filterOptions
       isMatched = false
     }
   }
-  else if (mode === 'LEVEL') {
+    else if (mode === 'LEVEL') {
     if (isUnEmptyString(levelFilter) && log.logLevel !== levelFilter) {
       isMatched = false
     }
@@ -122,374 +141,216 @@ export const isLogVisible = (log: LogDataPacket, mode: FilterMode, filterOptions
   return isMatched
 }
 
-// log operations
-/**
- * 高效地将新日志插入到缓存中，采用局部排序和切片替换机制。
- * 【修复】确保合并后的日志有序且唯一（基于 ID 去重）。
- * 【性能优化】同时更新 ID Set，避免每次去重时都遍历整个数组。
- * @param cache 缓存日志数组 (ref)
- * @param idSet ID Set (ref)，用于快速去重检查
- * @param newLogs 经过去重且已排序的新日志数组
- */
-const insertLogsOrdered = (
-  cache: Ref<LogDataPacket[]>,
-  idSet: Ref<Set<number>>,
-  newLogs: LogDataPacket[]
-): void => {
-
-
-
-
-
-
-  if (newLogs.length === 0) return;
-
-  const cacheArray = cache.value;
-  const firstNewLog = newLogs[0];
-  const lastNewLog = newLogs[newLogs.length - 1];
-
-  // 1. 找到起始插入点 startIdx: cacheArray 中第一个 >= firstNewLog 的日志的索引
-  const startIdx = findInsertionIndex(firstNewLog, cacheArray, logComparator);
-
-  // 2. 找到结束插入点 endIdx: cacheArray 中第一个 > lastNewLog 的日志的索引
-  let endIdx = findInsertionIndex(lastNewLog, cacheArray, logComparator);
-
-  //    需要向后延伸 endIdx，确保包含所有交错的旧日志
-  while (
-    endIdx < cacheArray.length &&
-    logComparator(cacheArray[endIdx], lastNewLog) <= 0
-  ) {
-    endIdx++;
+// detect & operations
+export const isValidLog = (log: unknown) => {
+  if (!log) {
+    console.log('[LOG PANEL STORE] ')
+    return false
   }
 
-  // 3. 截取、合并、去重、排序重组
-  const overlappingOldLogs = cacheArray.slice(startIdx, endIdx);
-  const mergedLogs = [...overlappingOldLogs, ...newLogs];
+  const data = log as LogDataPacket
 
-  // 【修复】去重：基于 ID 去重，保留第一个出现的日志（按排序顺序）
-  const seenIds = new Set<number>();
-  const uniqueMergedLogs: LogDataPacket[] = [];
-  for (const log of mergedLogs) {
-    if (!seenIds.has(log.id)) {
-      seenIds.add(log.id);
-      uniqueMergedLogs.push(log);
-    } else {
-      // 发现重复 ID，记录警告（分布式场景下可能发生）
-      console.warn(
-        `发现重复的日志 ID: ${log.id}, 时间戳: ${log.timestamp}, 已跳过`
-      );
-    }
+  if (!isUnEmptyString(data.id)) {
+    console.log('[LOG PANEL STORE] ')
+    return false
   }
 
-  // 对去重后的日志进行排序
-  uniqueMergedLogs.sort(logComparator);
+  if (isNil(data.timestamp)) {
+    console.log('[LOG PANEL STORE] ')
+    return false
+  }
 
-  // 4. 使用 splice 替换缓存中的旧片段
-  const oldSegmentLength = endIdx - startIdx;
-  const removedLogs = cacheArray.slice(startIdx, startIdx + oldSegmentLength);
-
-  // 【性能优化】更新 ID Set：移除被替换的日志 ID，添加新插入的日志 ID
-  removedLogs.forEach((log) => idSet.value.delete(log.id));
-  uniqueMergedLogs.forEach((log) => idSet.value.add(log.id));
-
-  cacheArray.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs);
-
-  // 【可选】验证最终结果（可通过导出函数手动调用完整验证）
-  // 注意：这里只做基本检查，完整验证请使用导出的 validateLogsOrderedAndUnique 函数
+  return true
 }
 
+const isLogsOrderedAndUnique = (logs: LogDataPacket[]): boolean => {
+  logs = Array.isArray(logs) ? logs : []
 
+  if (logs.length === 0) {
+    return true
+  }
 
-
-
-/**
- * 【新增】验证日志数组是否有序且唯一
- * @param logs 日志数组
- * @returns 如果有序且唯一返回 true，否则返回 false
- */
-const validateLogsOrderedAndUnique = (logs: LogDataPacket[]): boolean => {
-  if (logs.length === 0) return true;
-
-  const seenIds = new Set<number>();
+  const seenIds = new Set<string | number>()
 
   for (let i = 0; i < logs.length; i++) {
-    const log = logs[i];
+    const log = logs[i]
 
-    // 检查唯一性
     if (seenIds.has(log.id)) {
-      console.error(`发现重复的日志 ID: ${log.id}，位置: ${i}`);
-      return false;
+      console.error(`[LOG PANEL STORE] 发现重复的日志 ID: ${log.id}，位置: ${i}`)
+      return false
     }
-    seenIds.add(log.id);
 
-    // 检查有序性
+    seenIds.add(log.id)
+
     if (i > 0) {
-      const prevLog = logs[i - 1];
-      const comparison = logComparator(prevLog, log);
+      const prevLog = logs[i - 1]
+      const comparison = logComparator(prevLog, log)
+
       if (comparison > 0) {
-        console.error(
-          `日志顺序错误：位置 ${i - 1} 的日志 (ID: ${prevLog.id}, ts: ${
-            prevLog.timestamp
-          }) 大于位置 ${i} 的日志 (ID: ${log.id}, ts: ${log.timestamp})`
-        );
-        return false;
+        console.error(`[LOG PANEL STORE] 日志顺序错误: 位置 ${i - 1} 的日志 (ID: ${prevLog.id}, timestamp: ${prevLog.timestamp}) 大于位置 ${i} 的日志 (ID: ${log.id}, timestamp: ${log.timestamp})`)
+        return false
       }
     }
   }
 
-  return true;
-};
+  return true
+}
 
-/**
- * 辅助函数：获取最新日志的时间戳和序列号。
- */
-const getLatestLogTimeAndSequence = (logs: LogDataPacket[]) => {
+const getLatestLogTimeAndSequence = (logs?: LogDataPacket[]) => {
+  logs = Array.isArray(logs) ? logs : []
+
   if (logs.length === 0) {
-    // 首次轮询或缓存为空，使用当前时间往前推 50s 作为起始时间
-    return { timestamp: Date.now() - 50000, sequence: 0 };
+    return { timestamp: Date.now() - 1, sequence: 0 }
   }
-  const lastLog = logs[logs.length - 1];
-  return {
-    timestamp: lastLog.timestamp,
-    sequence: lastLog.sequence,
-  };
-};
 
-/**
- * 辅助函数：获取最旧日志的时间戳和序列号作为历史查询的上限。
- */
-const getOldestLogTimeAndSequence = (logs: LogDataPacket[]) => {
+  const log = logs[logs.length - 1]
+
+  return {
+    timestamp: log.timestamp,
+    sequence: log.sequence,
+  }
+}
+
+const getOldestLogTimeAndSequence = (logs?: LogDataPacket[]) => {
+  logs = Array.isArray(logs) ? logs : []
+
   if (logs.length === 0) {
-    // 缓存为空，使用当前时间作为最旧时间戳
-    return { timestamp: Date.now(), sequence: 0 };
+    return { timestamp: Date.now(), sequence: 0 }
   }
-  const firstLog = logs[0];
+
+  const log = logs[0]
+
   return {
-    timestamp: firstLog.timestamp,
-    sequence: firstLog.sequence,
-  };
-};
-
-// === 4. 模拟工具函数 (用于生成数据和 API 模拟) ===
-
-let mockLogIdCounter = MAX_MOCK_HISTORY_SIZE;
-
-const getLogColor = (level: LogLevel) => {
-  switch (level) {
-    case "ERROR":
-      return "\x1b[31m";
-    case "WARN":
-      return "\x1b[33m";
-    case "INFO":
-      return "\x1b[32m";
-    case "DEBUG":
-      return "\x1b[90m";
-    default:
-      return "\x1b[0m";
+    timestamp: log.timestamp,
+    sequence: log.sequence,
   }
-};
+}
 
-const formatLog = (item: Omit<LogDataPacket, "formattedMessage">): string => {
-  const reset = "\x1b[0m";
-  const dim = "\x1b[90m";
-  const color = getLogColor(item.logLevel);
+export const useLogStore = defineStore('logStore', () => {
+  const allLogs = ref<LogDataPacket[]>([]) // 全部缓存日志
+  const logIdSet = ref<Set<string | number>>(new Set()) // 全部缓存日志 ID
 
-  // 【修复】格式化时间戳为本地时间，而不是 UTC 时间
-  // toISOString() 返回的是 UTC 时间，会导致时区偏差（例如 GMT+8 会少 8 小时）
-  // 使用本地时间格式化：YYYY-MM-DD HH:mm:ss.SSS
-  const formatLocalTime = (timestamp: number): string => {
-    const date = new Date(timestamp);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    const hours = String(date.getHours()).padStart(2, "0");
-    const minutes = String(date.getMinutes()).padStart(2, "0");
-    const seconds = String(date.getSeconds()).padStart(2, "0");
-    const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
-  };
-
-  // 格式化：时间戳 (本地时间) + Sequence (4位)
-  return [
-    `${dim}${formatLocalTime(item.timestamp)}${reset}`,
-    `${dim}${item.sequence.toString().padStart(4, "0")}${reset}`,
-    `[\x1b[36m${item.serviceName.padEnd(12)}${reset}]`,
-    `\x1b[34m${item.userId.padEnd(8)}${reset}`,
-    `${color}${item.logLevel.padEnd(5)}${reset}`,
-    `${item.info}`,
-  ].join("  ");
-};
-
-const mockLogGeneration = (
-  id: number,
-  timestamp: number,
-  isHistorical: boolean
-): LogDataPacket => {
-  const logLevel: LogLevel = ["INFO", "INFO", "INFO", "DEBUG", "WARN", "ERROR"][
-    Math.floor(Math.random() * 6)
-  ] as LogLevel;
-  const serviceName =
-    MOCK_SERVICES[Math.floor(Math.random() * MOCK_SERVICES.length)];
-  const userIdRaw = MOCK_USERS[Math.floor(Math.random() * MOCK_USERS.length)];
-  const userId = userIdRaw || "guest"; // LogDataPacket 的 userId 是 string，不是 null
-  const groupId = MOCK_GROUPS[Math.floor(Math.random() * MOCK_GROUPS.length)];
-  const clientId =
-    MOCK_CLIENTS[Math.floor(Math.random() * MOCK_CLIENTS.length)];
-  const info = isHistorical
-    ? `[History #${id}] Log message for ${serviceName} at level ${logLevel}.`
-    : `[LIVE #${id}] Processing request for ${userId}.`;
-
-  // 生成 Sequence (0-999)
-  const sequence = Math.floor(Math.random() * 1000);
-
-  const formattedMessage = formatLog({
-    id,
-    timestamp,
-    sequence,
-    logLevel,
-    serviceName,
-    userId,
-    groupId,
-    clientId,
-    info,
-  });
-
-  const result: LogDataPacket = {
-    id,
-    timestamp,
-    sequence,
-    logLevel,
-    serviceName,
-    userId,
-    groupId,
-    clientId,
-    info,
-    formattedMessage,
-  };
-
-  return result;
-};
-
-// 用于初始化的模拟函数
-const generateMockLogs = (
-  count: number,
-  startId: number,
-  startTime: number
-): LogDataPacket[] => {
-  const logs: LogDataPacket[] = [];
-  let currentTimestamp = startTime;
-  for (let i = 0; i < count; i++) {
-    const id = startId + i;
-    currentTimestamp += 100; // 时间递增
-    logs.push(mockLogGeneration(id, currentTimestamp, false));
-  }
-  return logs;
-};
-
-/**
- * 模拟一个基于时间戳的 API 轮询 (拉取新日志)。
- * 新日志模拟存在时间戳交错。
- */
-const pullNewLogsMockAPI = (
-  sinceTimestamp: number,
-  limit: number
-): LogDataPacket[] => {
-  const newLogs: LogDataPacket[] = [];
-  const logCount = Math.min(
-    limit,
-    10 + Math.floor(Math.random() * (limit - 10))
-  );
-
-  let currentTimestamp = sinceTimestamp;
-
-  for (let i = 0; i < logCount; i++) {
-    currentTimestamp += 50 + Math.floor(Math.random() * 50);
-    mockLogIdCounter++;
-
-    const logItem = mockLogGeneration(
-      mockLogIdCounter,
-      currentTimestamp,
-      false
-    );
-
-    // 模拟时间戳重复/交错的场景，使其与缓存末尾日志交错
-    if (i > 0 && Math.random() < 0.1) {
-      logItem.timestamp = newLogs[i - 1].timestamp;
+  const insertLogsOrdered = (newLogs: LogDataPacket[]) => {
+    if (newLogs.length === 0) {
+      return
     }
 
-    newLogs.push(logItem);
-  }
+    const cachedAllLogs = allLogs.value
+    const firstNewLog = newLogs[0]
+    const lastNewLog = newLogs[newLogs.length - 1]
 
-  newLogs.sort(logComparator);
+    // 查找日志范围插入点
+    const startIdx = findInsertionIndex(firstNewLog, cachedAllLogs, logComparator)
+    const endIdx = findInsertionIndex(lastNewLog, cachedAllLogs, logComparator)
 
-  return newLogs;
-};
+    // 截取合并
+    const overlappingOldLogs = cachedAllLogs.slice(startIdx, endIdx)
+    const logsToMerge = [...overlappingOldLogs, ...newLogs]
 
-/**
- * 模拟一个基于时间范围的 API 查询，用于历史数据加载 (拉取旧日志)。
- * 查询范围为 (startTime, endTime]。
- */
-const pullOlderLogsMockAPI = (
-  startTime: number,
-  endTime: number,
-  limit: number
-): LogDataPacket[] => {
-  const olderLogs: LogDataPacket[] = [];
+    // 去重
+    const seenIds = new Set<string | number>()
+    const uniqueMergedLogs: LogDataPacket[] = []
 
-  const logCount = Math.min(
-    limit,
-    10 + Math.floor(Math.random() * (limit - 10))
-  );
-  const timeRange = endTime - startTime;
-
-  for (let i = 0; i < logCount * 2; i++) {
-    // 尝试生成更多日志以满足 limit
-
-    // 在 [startTime, endTime] 范围内随机生成时间戳
-    const logTimestamp = startTime + Math.random() * timeRange;
-
-    // 模拟一个旧 ID (ID 从 1 到 MAX_MOCK_HISTORY_SIZE)
-    const mockHistoricalId =
-      1 + Math.floor(Math.random() * MAX_MOCK_HISTORY_SIZE);
-
-    const logItem = mockLogGeneration(mockHistoricalId, logTimestamp, true);
-
-    // 确保它在时间范围 (startTime, endTime] 内
-    if (logItem.timestamp > startTime && logItem.timestamp <= endTime) {
-      olderLogs.push(logItem);
+    for (const log of logsToMerge) {
+      if (!seenIds.has(log.id)) {
+        seenIds.add(log.id)
+        uniqueMergedLogs.push(log)
+      }
+      else {
+        console.warn(`[LOG PANEL STORE] 发现重复的日志 ID: ${log.id}, 时间戳: ${log.timestamp}, 已跳过`)
+      }
     }
+
+    // 排序
+    uniqueMergedLogs.sort(logComparator)
+
+    // 重组
+    const oldSegmentLength = endIdx - startIdx
+    const removedLogs = cachedAllLogs.slice(startIdx, startIdx + oldSegmentLength)
+
+    removedLogs.forEach((log) => logIdSet.value.delete(log.id))
+    uniqueMergedLogs.forEach((log) => logIdSet.value.add(log.id))
+    cachedAllLogs.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs)
   }
 
-  // 历史日志必须按时间升序返回
-  olderLogs.sort(logComparator);
+  const filteredLogs = computed(() => {
+    if (filterMode.value === 'NONE') {
+      return allLogs.value
+    }
 
-  // 模拟 API 仅返回 limit 条（通常是最旧的那些）
-  return olderLogs.slice(0, limit);
-};
+    const filterOptions: FilterOptions = {
+      levelFilter: levelFilter.value || undefined,
+      userIdFilter: userIdFilter.value || undefined,
+      groupIdFilter: groupIdFilter.value || undefined,
+      clientIdFilter: clientIdFilter.value || undefined,
+    }
 
-export const useLogStore = defineStore("logTerminal", () => {
+    if (!hasActiveFilter(filterMode.value, filterOptions)) {
+      return allLogs.value
+    }
+
+    return allLogs.value.filter((item) => isLogVisible(item, filterMode.value, filterOptions))
+  })
+
+  const totalCount = computed(() => allLogs.value.length)
+  const filteredCount = computed(() => filteredLogs.value.length)
+
+  // polling & history
+  
+
+
+  // group & filter
+  const filterMode = ref<FilterMode>('NONE')
+  const levelFilter = ref<string | null>(null)
+  const userIdFilter = ref<string | null>(null)
+  const groupIdFilter = ref<string | null>(null)
+  const clientIdFilter = ref<string | null>(null)
+
+  const setFilterMode = (mode: FilterMode) => {
+    filterMode.value = mode
+  }
+
+  const setLevelFilter = (level: string | null) => {
+    levelFilter.value = level
+  }
+
+  const setUserIdFilter = (id: string | null) => {
+    userIdFilter.value = id
+  }
+
+  const setGroupIdFilter = (id: string | null) => {
+    groupIdFilter.value = id
+  }
+
+  const setClientIdFilter = (id: string | null) => {
+    clientIdFilter.value = id
+  }
 
 
 
 
-  // === 状态 State ===
-  const initialLogs = generateMockLogs(
-    500,
-    MAX_MOCK_HISTORY_SIZE,
-    Date.now() - 500 * 100
-  ).sort(logComparator);
-  const allLogs = ref<LogDataPacket[]>(initialLogs);
 
-  // 【修改】用于跟踪历史加载的最旧时间戳
-  const oldestLogTimestamp = ref(
-    initialLogs.length > 0 ? initialLogs[0].timestamp : Date.now()
-  );
 
-  // 【合并字段】记录轮询的起始/当前位置时间戳
-  // - 历史加载截断时：设置为截断位置的时间戳
-  // - 每次轮询后：更新为本次获取的最新日志的时间戳
-  // - 下次轮询时：从该时间戳继续，避免重复查询
-  const lastPolledTimestamp = ref<number | null>(null);
+  
+
+
+
+
+
+
+
+
+
+
+
+
+  // 轮询
+  const isPollingError = ref(false)
+  const retryCount = ref(0)
+  const isPermanentError = ref(false)
+  const isFetchingHistory = ref(false)
+  const lastPolledTimestamp = ref<number>(getLatestLogTimeAndSequence(allLogs.value).timestamp)
+  const oldestLogTimestamp = ref<number>(getOldestLogTimeAndSequence(allLogs.value).timestamp)
 
   // 【新增】移动哨兵机制：用于检查 [oldestLogTimestamp, lastPolledTimestamp] 区间内的延迟上报日志
   // - sentinelTimestamp: 哨兵当前位置，从 oldestLogTimestamp 开始，逐步移动到 lastPolledTimestamp
@@ -499,119 +360,28 @@ export const useLogStore = defineStore("logTerminal", () => {
   const sentinelPollCount = ref(0);
   const sentinelCooldownCount = ref(0);
 
-  // 过滤状态
-  const filterMode = ref<FilterMode>("ALL");
-  const levelFilter = ref<string | null>(null);
-  const groupIdFilter = ref<string | null>(null);
-  const clientIdFilter = ref<string | null>(null);
-  const userIdFilter = ref<string | null>(null);
+  // 基于实际加载历史数据的情况来判断是否还有更多历史
+  const hasMoreHistory = ref(true)
 
-  // 轮询状态
-  const isPollingError = ref(false);
-  const retryCount = ref(0);
-  const isFetchingHistory = ref(false);
-  const isPermanentError = ref(false); // 【新增】永久错误状态（超过最大重试次数）
 
-  // 【性能优化】维护一个 ID Set，避免每次去重时都遍历整个数组
-  const logIdSet = ref<Set<number>>(new Set(initialLogs.map((log) => log.id)));
 
-  // === 计算属性 Getters ===
-
-  // 【性能优化】filteredLogs 使用 computed，Vue 会自动缓存，只在依赖变化时重新计算
-  const filteredLogs = computed(() => {
-    // 如果没有任何过滤条件，直接返回 allLogs（避免不必要的过滤）
-    if (filterMode.value === "NONE") {
-      return allLogs.value;
-    }
-
-    // 【修复】检查是否有任何有效的过滤条件
-    let hasActiveFilter = false;
-
-    if (filterMode.value === "ALL") {
-      // ALL 模式：检查是否有任何过滤器被设置
-      hasActiveFilter =
-        levelFilter.value !== null ||
-        (groupIdFilter.value !== null && groupIdFilter.value.length > 0) ||
-        (clientIdFilter.value !== null && clientIdFilter.value.length > 0) ||
-        userIdFilter.value !== null;
-    } else if (filterMode.value === "LEVEL") {
-      // LEVEL 模式：只检查 levelFilter
-      hasActiveFilter = levelFilter.value !== null;
-    } else if (filterMode.value === "GROUP_ID") {
-      // GROUP_ID 模式：只检查 groupIdFilter
-      hasActiveFilter =
-        groupIdFilter.value !== null && groupIdFilter.value.length > 0;
-    } else if (filterMode.value === "CLIENT_ID") {
-      // CLIENT_ID 模式：只检查 clientIdFilter
-      hasActiveFilter =
-        clientIdFilter.value !== null && clientIdFilter.value.length > 0;
-    } else if (filterMode.value === "USER_ID") {
-      // USER_ID 模式：只检查 userIdFilter
-      hasActiveFilter = userIdFilter.value !== null;
-    }
-
-    // 【修复】如果没有有效的过滤条件，直接返回 allLogs（适用于所有模式）
-    if (!hasActiveFilter) {
-      return allLogs.value;
-    }
-
-    // 有过滤条件时才进行过滤
-    return allLogs.value.filter((item) =>
-      isLogVisible(
-        item,
-        filterMode.value,
-        {
-          levelFilter: levelFilter.value || undefined,
-          groupIdFilter: groupIdFilter.value || undefined,
-          clientIdFilter: clientIdFilter.value || undefined,
-          userIdFilter: userIdFilter.value || undefined,
-        }
-      )
-    );
-  });
-
-  const totalCount = computed(() => allLogs.value.length);
-  const filteredCount = computed(() => filteredLogs.value.length);
-
-  // 假设如果最旧时间戳低于 6 个月前，则认为没有更多历史
-  const hasMoreHistory = computed(() => {
-    const SIX_MONTHS_MS = 6 * 30 * 24 * 3600 * 1000;
-    return oldestLogTimestamp.value > Date.now() - SIX_MONTHS_MS;
-  });
-
-  // === 动作 Actions ===
-
-  const setFilterMode = (mode: FilterMode) => {
-    filterMode.value = mode;
-  };
-  const setLevelFilter = (level: string | null) => {
-    levelFilter.value = level;
-  };
-  const setGroupIdFilter = (id: string | null) => {
-    groupIdFilter.value = id;
-  };
-  const setClientIdFilter = (id: string | null) => {
-    clientIdFilter.value = id;
-  };
-  const setUserIdFilter = (id: string | null) => {
-    userIdFilter.value = id;
-  };
 
   const resetRetryState = () => {
     isPollingError.value = false;
     retryCount.value = 0;
     isPermanentError.value = false; // 【修复】重置永久错误状态
   };
-
-  const clearAllLogs = () => {
+    
+    const clearAllLogs = () => {
     allLogs.value = [];
     logIdSet.value.clear(); // 【性能优化】清空 ID Set
-    oldestLogTimestamp.value = Date.now(); // 重置最旧时间戳
+        oldestLogTimestamp.value = Date.now(); // 重置最旧时间戳
     lastPolledTimestamp.value = null; // 清除已轮询时间戳
     // 【新增】重置哨兵状态
     sentinelTimestamp.value = null;
     sentinelPollCount.value = 0;
     sentinelCooldownCount.value = 0; // 重置冷却状态
+    hasMoreHistory.value = true; // 重置历史数据状态
   };
 
   /**
@@ -625,35 +395,35 @@ export const useLogStore = defineStore("logTerminal", () => {
     sentinelCooldownCount.value = 0; // 重置冷却状态
   };
 
-  /**
-   * 获取过滤后日志的切片，用于虚拟滚动。
-   */
+    /**
+     * 获取过滤后日志的切片，用于虚拟滚动。
+     */
   const getLogSlice = (start: number, size: number): LogDataPacket[] => {
-    return filteredLogs.value.slice(start, start + size);
-  };
+        return filteredLogs.value.slice(start, start + size);
+    };
 
-  /**
-   * 【已更新】模拟加载更旧的历史日志。使用时间范围查询和局部排序。
+    /**
+     * 【已更新】模拟加载更旧的历史日志。使用时间范围查询和局部排序。
    * 【重要更新】允许从最新端截断数据，但记录截断位置的时间戳，以便轮询时从截断位置继续。
    * 【修复】如果加载历史数据后超出缓存上限，返回特殊值 -1 表示需要停止轮询。
-   */
-  const fetchOlderLogs = async (): Promise<number> => {
-    if (!hasMoreHistory.value || isFetchingHistory.value) return 0;
+     */
+    const fetchOlderLogs = async (): Promise<number> => {
+        if (!hasMoreHistory.value || isFetchingHistory.value) return 0;
 
     // 【修复】如果缓存已接近上限，不允许加载历史，避免截断最新数据
     if (allLogs.value.length >= MAX_CACHE_SIZE - 100) {
       console.warn("缓存已满，无法加载更多历史日志。请先导出或清空部分数据。");
       return -1; // 返回 -1 表示需要停止轮询
     }
-
-    isFetchingHistory.value = true;
+        
+        isFetchingHistory.value = true;
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    // 1. 确定查询范围
+        // 1. 确定查询范围
     const { timestamp: endTime } = getOldestLogTimeAndSequence(allLogs.value);
-    const startTime = endTime - HISTORY_TIME_STEP; // 往前推一个时间步长 (1小时)
-
-    // 模拟 API 查询
+        const startTime = endTime - HISTORY_TIME_STEP; // 往前推一个时间步长 (1小时)
+        
+        // 模拟 API 查询
     const olderLogs = pullOlderLogsMockAPI(startTime, endTime, HISTORY_LIMIT);
 
     // 2. 去重和排序
@@ -676,9 +446,9 @@ export const useLogStore = defineStore("logTerminal", () => {
       (log) => !logIdSet.value.has(log.id)
     );
 
-    if (uniqueOlderLogs.length > 0) {
-      // 3. 局部插入和排序：处理旧日志与现有缓存开头的交错
-      insertLogsOrdered(allLogs, logIdSet, uniqueOlderLogs);
+        if (uniqueOlderLogs.length > 0) {
+            // 3. 局部插入和排序：处理旧日志与现有缓存开头的交错
+      insertLogsOrdered(uniqueOlderLogs);
 
       // 4. 【更新】溢出处理：如果插入后超过上限，从最新端移除，并记录截断位置的时间戳
       if (allLogs.value.length > MAX_CACHE_SIZE) {
@@ -728,9 +498,9 @@ export const useLogStore = defineStore("logTerminal", () => {
         // 【修复】返回 -1 表示超出缓存上限，需要停止轮询
         isFetchingHistory.value = false;
         return -1;
-      }
+            }
 
-      // 5. 更新最旧时间戳
+            // 5. 更新最旧时间戳
       if (allLogs.value.length > 0) {
         oldestLogTimestamp.value = allLogs.value[0].timestamp;
 
@@ -745,38 +515,45 @@ export const useLogStore = defineStore("logTerminal", () => {
           );
           lastPolledTimestamp.value = null;
         }
-      }
-    } else if (olderLogs.length < HISTORY_LIMIT) {
-      // 如果 API 返回的日志少于限制，并且没有新的 unique 日志，可能已经加载到底了
-      // 为避免无限加载，只有当时间戳达到很久以前才停止
-      const ONE_MONTH_MS = 30 * 24 * 3600 * 1000;
-      if (startTime < Date.now() - ONE_MONTH_MS) {
-        // 这里实际上由 computed 的 hasMoreHistory 控制
-      }
-    }
+            }
+        }
 
-    isFetchingHistory.value = false;
-    return uniqueOlderLogs.length;
-  };
+        // 根据实际加载情况更新 hasMoreHistory
+        // 判断逻辑：
+        // 1. 如果 API 返回的日志数量少于限制，说明可能已经加载到底了
+        // 2. 如果 API 返回的日志数量等于限制，说明可能还有更多历史数据
+        // 3. 如果 uniqueOlderLogs.length === 0 但 olderLogs.length >= HISTORY_LIMIT，
+        //    说明这次返回的都是重复的，但可能还有更多历史数据（继续尝试）
+        if (olderLogs.length < HISTORY_LIMIT) {
+          hasMoreHistory.value = false
+          console.log(`没有更多历史数据了。API 返回日志数: ${olderLogs.length} < ${HISTORY_LIMIT}，去重后: ${uniqueOlderLogs.length}`)
+        } else {
+          // API 返回的日志数量等于限制，说明可能还有更多历史数据
+          hasMoreHistory.value = true
+        }
 
-  /**
-   * 【已更新】模拟轮询获取新日志。使用局部排序。
+        isFetchingHistory.value = false;
+        return uniqueOlderLogs.length;
+    };
+
+    /**
+     * 【已更新】模拟轮询获取新日志。使用局部排序。
    * 【重要更新】如果存在 lastPolledTimestamp，从该位置继续轮询，避免重复查询。
    * 每次轮询后更新 lastPolledTimestamp 为本次获取的最新日志时间戳。
-   * 溢出时从最旧日志端 (开头) 移除，并更新 oldestLogTimestamp。
-   */
+     * 溢出时从最旧日志端 (开头) 移除，并更新 oldestLogTimestamp。
+     */
   const pullAndProcessLogs = async (): Promise<{
     newLogs: LogDataPacket[];
     nextDelay: number;
   }> => {
     let uniqueNewLogs: LogDataPacket[] = [];
-    let nextDelay = POLL_INTERVAL_BASE;
-
-    try {
-      if (Math.random() < 0.05 && retryCount.value < 3) {
-        throw new Error("Simulated API failure.");
-      }
-
+        let nextDelay = POLL_INTERVAL_BASE;
+        
+        try {
+            if (Math.random() < 0.05 && retryCount.value < 3) {
+                throw new Error("Simulated API failure.");
+            }
+            
       await new Promise((resolve) =>
         setTimeout(resolve, 50 + Math.random() * 100)
       );
@@ -792,10 +569,10 @@ export const useLogStore = defineStore("logTerminal", () => {
         const latest = getLatestLogTimeAndSequence(allLogs.value);
         sinceTimestamp = latest.timestamp;
       }
-
-      // 模拟 API 调用
-      const fetchedLogs = pullNewLogsMockAPI(sinceTimestamp, POLLING_LIMIT);
-
+            
+            // 模拟 API 调用
+            const fetchedLogs = pullNewLogsMockAPI(sinceTimestamp, POLLING_LIMIT);
+            
       // 【修复】去重和排序
       // 先对 fetchedLogs 内部去重（分布式场景下，同一批日志可能有重复 ID）
       const seenIdsInBatch = new Set<number>();
@@ -816,9 +593,9 @@ export const useLogStore = defineStore("logTerminal", () => {
         (log) => !logIdSet.value.has(log.id)
       );
 
-      if (uniqueNewLogs.length > 0) {
-        // 1. 局部插入和排序：处理新日志与现有缓存末尾的交错
-        insertLogsOrdered(allLogs, logIdSet, uniqueNewLogs);
+            if (uniqueNewLogs.length > 0) {
+                // 1. 局部插入和排序：处理新日志与现有缓存末尾的交错
+        insertLogsOrdered(uniqueNewLogs);
 
         // 2. 【更新】更新已轮询到的最新时间戳（使用本次获取的最新日志的时间戳）
         // 【修复】确保数组不为空
@@ -863,10 +640,10 @@ export const useLogStore = defineStore("logTerminal", () => {
           // 如果没有返回任何日志，使用查询起点作为已轮询时间戳
           lastPolledTimestamp.value = sinceTimestamp;
         }
-      }
-
-      isPollingError.value = false;
-      retryCount.value = 0;
+            }
+            
+            isPollingError.value = false;
+            retryCount.value = 0; 
 
       // 【新增】移动哨兵轮询：检查 [oldestLogTimestamp, lastPolledTimestamp] 区间内的延迟上报日志
       // 【优化】限制检查时间窗口，避免区间无限扩大
@@ -1004,7 +781,7 @@ export const useLogStore = defineStore("logTerminal", () => {
                     );
 
                     // 插入到缓存中
-                    insertLogsOrdered(allLogs, logIdSet, uniqueSentinelLogs);
+                    insertLogsOrdered(uniqueSentinelLogs);
 
                     // 更新哨兵位置为本次查询的最旧日志时间戳（往前递进）
                     const oldestSentinelLog = uniqueSentinelLogs[0];
@@ -1152,10 +929,10 @@ export const useLogStore = defineStore("logTerminal", () => {
           lastPolledTimestamp.value = null;
         }
       }
-    } catch (error) {
-      console.error("Polling failed:", error);
-      isPollingError.value = true;
-      retryCount.value++;
+        } catch (error) {
+            console.error("Polling failed:", error);
+            isPollingError.value = true;
+            retryCount.value++;
 
       // 【修复】如果超过最大重试次数，设置永久错误状态并停止轮询
       if (retryCount.value >= MAX_RETRY_COUNT) {
@@ -1184,63 +961,46 @@ export const useLogStore = defineStore("logTerminal", () => {
       console.log(
         `轮询失败，第 ${retryCount.value} 次重试，延迟 ${nextDelay}ms (基础: ${baseDelay}ms, 上限: ${MAX_RETRY_DELAY}ms)`
       );
-    }
+        }
 
-    return { newLogs: uniqueNewLogs, nextDelay };
-  };
+        return { newLogs: uniqueNewLogs, nextDelay };
+    };
 
-  /**
-   * 模拟导出所有日志为 JSON 或其他格式。
-   */
-  const exportAllLogs = () => {
-    const json = JSON.stringify(allLogs.value, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `log_export_${Date.now()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  return {
-    // State
+    return {
+        // State
     allLogs,
-    filterMode,
-    levelFilter,
-    groupIdFilter,
-    clientIdFilter,
-    userIdFilter,
-    isPollingError,
-    retryCount,
-    isFetchingHistory,
+        filterMode,
+        levelFilter,
+        groupIdFilter,
+        clientIdFilter,
+        userIdFilter,
+        isPollingError,
+        retryCount,
+        isFetchingHistory,
     isPermanentError,
     lastPolledTimestamp,
-
-    // Getters
-    totalCount,
-    filteredCount,
-    filteredLogs,
-    hasMoreHistory,
-
-    // Actions
-    setFilterMode,
-    setLevelFilter,
-    setGroupIdFilter,
-    setClientIdFilter,
-    setUserIdFilter,
-    resetRetryState,
-    clearAllLogs,
+        
+        // Getters
+        totalCount,
+        filteredCount,
+        filteredLogs,
+        hasMoreHistory,
+        
+        // Actions
+        setFilterMode,
+        setLevelFilter,
+        setGroupIdFilter,
+        setClientIdFilter,
+        setUserIdFilter,
+        resetRetryState,
+        clearAllLogs,
     clearLastPolledTimestamp,
-    fetchOlderLogs,
-    pullAndProcessLogs,
-    getLogSlice,
-    exportAllLogs,
+        fetchOlderLogs,
+        pullAndProcessLogs,
+        getLogSlice,
 
     // 【导出验证函数】用于验证日志的有序性和唯一性（开发/调试用）
     validateLogsOrderedAndUnique: () =>
-      validateLogsOrderedAndUnique(allLogs.value),
-  };
+      isLogsOrderedAndUnique(allLogs.value),
+    };
 });

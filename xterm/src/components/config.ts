@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 // ========== 缓存配置 ==========
 /** 最大缓存日志数量 */
 export const MAX_CACHE_SIZE = 10000;
@@ -56,22 +47,6 @@ export const TERMINAL_SIZE = 2000;
 
 /** 滚动阈值（行数），用于判断是否滚动到底部 */
 export const SCROLL_THRESHOLD = 3;
-
-// ========== 模拟数据配置 ==========
-/** 模拟的总历史日志条数 */
-export const MAX_MOCK_HISTORY_SIZE = 50000;
-
-/** 模拟用户列表 */
-export const MOCK_USERS = ["admin", "userA", "userB", null];
-
-/** 模拟服务列表 */
-export const MOCK_SERVICES = ["AuthService", "DataProcessor", "Gateway", "Analytics"];
-
-/** 模拟组列表 */
-export const MOCK_GROUPS = ["A100", "B200", "C300"];
-
-/** 模拟客户端列表 */
-export const MOCK_CLIENTS = ["ClientX", "ClientY", "ClientZ"];
 
 // ========== 用户配置 ==========
 /** 当前用户（用于"只看我的"过滤） */

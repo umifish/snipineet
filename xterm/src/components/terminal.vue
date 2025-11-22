@@ -89,7 +89,7 @@
                 :icon="Download"
                 circle
                 size="small"
-                @click="store.exportAllLogs"
+                @click="handleExportLogs"
                 title="下载"
               />
               <el-button
@@ -269,6 +269,7 @@
     SCROLL_THRESHOLD,
   } from "./config";
   import { Download, Delete, Loading } from "@element-plus/icons-vue";
+import { exportLogsToJson } from "../utils/export";
   
   const store = useLogStore();
   
@@ -763,6 +764,10 @@ let fitAddon: FitAddon | null = null;
     }
   };
   
+  const handleExportLogs = () => {
+    exportLogsToJson(store.allLogs)
+  }
+
   const clearView = () => {
     store.clearAllLogs();
     term?.clear();

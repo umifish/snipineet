@@ -4,9 +4,9 @@ export type FilterMode = 'ALL' | 'NONE' | 'LEVEL' | 'GROUP_ID' | 'CLIENT_ID' | '
 
 export interface LogDataPacket {
   id: string | number
-  groupId: string | number
+  groupId: string
   userId: string | number
-  clientId: string | number
+  clientId: string
   serviceName: string
   logLevel: LogLevel
   timestamp: number
