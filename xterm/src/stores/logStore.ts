@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, type Ref } from 'vue'
+import { ref, computed } from 'vue'
 import { FilterMode, LogDataPacket } from './type'
 import { generateMockLogs, pullNewLogsMockAPI, pullOlderLogsMockAPI } from './mock'
 
@@ -31,7 +31,8 @@ export const SENTINEL_COOLDOWN_INTERVAL = 6 // 哨兵冷却间隔：完成一轮
 export const SENTINEL_TIME_STEP = 300000 // 哨兵每次查询的时间步长（毫秒），每次往前检查的时间范围
 
 // insertion & sorting
-export type LogComparator = (a: LogDataPacket, b: LogDataPacket) => number
+export type Comparator<T> = (a: T, b: T) => number
+export type LogComparator = Comparator<LogDataPacket>
 
 export const logComparator: LogComparator = (a, b) => {
     if (a.timestamp !== b.timestamp) {
@@ -41,22 +42,117 @@ export const logComparator: LogComparator = (a, b) => {
   return a.sequence - b.sequence
 }
 
-export const findInsertionIndex = (log: LogDataPacket, logs: LogDataPacket[], comparator: LogComparator) => {
-  let high = logs.length
+/**
+ * 查找元素在有序数组中的插入位置
+ * @param item 要查找的元素
+ * @param array 有序数组
+ * @param comparator 比较函数
+ * @returns 插入位置索引
+ */
+export const findInsertionIndex = <T>(
+  item: T,
+  array: T[],
+  comparator: (a: T, b: T) => number
+): number => {
+  let high = array.length
   let low = 0
 
-    while (low < high) {
+  while (low < high) {
     const mid = Math.floor((low + high) / 2)
 
-    if (comparator(logs[mid], log) < 0) {
+    if (comparator(array[mid], item) < 0) {
       low = mid + 1
-    }
-    else {
+    } else {
       high = mid
     }
   }
 
   return low
+}
+
+/**
+ * 默认的重复 ID 处理函数
+ */
+const defaultOnDuplicateId = (id: string | number, timestamp?: number) => {
+  console.warn(`[LOG PANEL STORE] 发现重复的日志 ID: ${id}, 时间戳: ${timestamp}, 已跳过`)
+}
+
+/**
+ * 插入日志的选项
+ */
+export interface InsertLogsOptions<T> {
+  /** 日志比较函数，默认为 logComparator（仅适用于 LogDataPacket 类型） */
+  comparator?: Comparator<T>
+  /** 发现重复 ID 时的回调函数，默认为 defaultOnDuplicateId */
+  onDuplicateId?: (id: string | number, timestamp?: number) => void
+}
+
+/**
+ * 将新日志有序插入到目标数组中，并维护 ID Set
+ * @param targetLogs 目标日志数组（会被修改）
+ * @param idSet 日志 ID Set（会被修改）
+ * @param newLogs 要插入的新日志数组
+ * @param options 选项对象，包含 comparator 和 onDuplicateId
+ */
+export function insertLogsOrdered<T extends { id: string | number }>(
+  targetLogs: T[],
+  idSet: Set<string | number>,
+  newLogs: T[],
+  options?: InsertLogsOptions<T>
+): void {
+  const { comparator, onDuplicateId = defaultOnDuplicateId } = options || {}
+  
+  // 如果没有提供 comparator，且类型是 LogDataPacket，使用默认的 logComparator
+  let actualComparator: (a: T, b: T) => number
+  if (!comparator) {
+    // 检查是否是 LogDataPacket 类型
+    if (targetLogs.length > 0 && 'timestamp' in targetLogs[0] && 'sequence' in targetLogs[0]) {
+      actualComparator = logComparator as unknown as (a: T, b: T) => number
+    } else {
+      throw new Error('comparator is required for non-LogDataPacket types')
+    }
+  } else {
+    actualComparator = comparator as (a: T, b: T) => number
+  }
+  if (newLogs.length === 0) {
+    return
+  }
+
+  const firstNewLog = newLogs[0]
+  const lastNewLog = newLogs[newLogs.length - 1]
+
+  // 查找日志范围插入点
+  const startIdx = findInsertionIndex(firstNewLog, targetLogs, actualComparator)
+  const endIdx = findInsertionIndex(lastNewLog, targetLogs, actualComparator)
+
+  // 截取合并
+  const overlappingOldLogs = targetLogs.slice(startIdx, endIdx)
+  const logsToMerge = [...overlappingOldLogs, ...newLogs]
+
+  // 去重
+  const seenIds = new Set<string | number>()
+  const uniqueMergedLogs: T[] = []
+
+  for (const log of logsToMerge) {
+    if (!seenIds.has(log.id)) {
+      seenIds.add(log.id)
+      uniqueMergedLogs.push(log)
+    }
+    else {
+      onDuplicateId(log.id, (log as any).timestamp)
+    }
+  }
+
+  // 排序
+  uniqueMergedLogs.sort(actualComparator)
+
+  // 重组
+  const oldSegmentLength = endIdx - startIdx
+  const removedLogs = targetLogs.slice(startIdx, startIdx + oldSegmentLength)
+
+  removedLogs.forEach((log) => idSet.delete(log.id))
+  uniqueMergedLogs.forEach((log) => idSet.add(log.id))
+  targetLogs.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs)
 }
 
 // detect & filter
@@ -199,13 +295,13 @@ const isLogsOrderedAndUnique = (logs: LogDataPacket[]): boolean => {
 const getLatestLogTimeAndSequence = (logs?: LogDataPacket[]) => {
   logs = Array.isArray(logs) ? logs : []
 
-  if (logs.length === 0) {
+    if (logs.length === 0) {
     return { timestamp: Date.now() - 1, sequence: 0 }
-  }
+    }
 
   const log = logs[logs.length - 1]
 
-  return {
+    return { 
     timestamp: log.timestamp,
     sequence: log.sequence,
   }
@@ -219,8 +315,8 @@ const getOldestLogTimeAndSequence = (logs?: LogDataPacket[]) => {
   }
 
   const log = logs[0]
-
-  return {
+    
+    return {
     timestamp: log.timestamp,
     sequence: log.sequence,
   }
@@ -229,49 +325,8 @@ const getOldestLogTimeAndSequence = (logs?: LogDataPacket[]) => {
 export const useLogStore = defineStore('logStore', () => {
   const allLogs = ref<LogDataPacket[]>([]) // 全部缓存日志
   const logIdSet = ref<Set<string | number>>(new Set()) // 全部缓存日志 ID
-
-  const insertLogsOrdered = (newLogs: LogDataPacket[]) => {
-    if (newLogs.length === 0) {
-      return
-    }
-
-    const cachedAllLogs = allLogs.value
-    const firstNewLog = newLogs[0]
-    const lastNewLog = newLogs[newLogs.length - 1]
-
-    // 查找日志范围插入点
-    const startIdx = findInsertionIndex(firstNewLog, cachedAllLogs, logComparator)
-    const endIdx = findInsertionIndex(lastNewLog, cachedAllLogs, logComparator)
-
-    // 截取合并
-    const overlappingOldLogs = cachedAllLogs.slice(startIdx, endIdx)
-    const logsToMerge = [...overlappingOldLogs, ...newLogs]
-
-    // 去重
-    const seenIds = new Set<string | number>()
-    const uniqueMergedLogs: LogDataPacket[] = []
-
-    for (const log of logsToMerge) {
-      if (!seenIds.has(log.id)) {
-        seenIds.add(log.id)
-        uniqueMergedLogs.push(log)
-      }
-      else {
-        console.warn(`[LOG PANEL STORE] 发现重复的日志 ID: ${log.id}, 时间戳: ${log.timestamp}, 已跳过`)
-      }
-    }
-
-    // 排序
-    uniqueMergedLogs.sort(logComparator)
-
-    // 重组
-    const oldSegmentLength = endIdx - startIdx
-    const removedLogs = cachedAllLogs.slice(startIdx, startIdx + oldSegmentLength)
-
-    removedLogs.forEach((log) => logIdSet.value.delete(log.id))
-    uniqueMergedLogs.forEach((log) => logIdSet.value.add(log.id))
-    cachedAllLogs.splice(startIdx, oldSegmentLength, ...uniqueMergedLogs)
-  }
+  const lastPolledTimestamp = ref<number>(getLatestLogTimeAndSequence(allLogs.value).timestamp) // 最近的轮询时间戳
+  const oldestLogTimestamp = ref<number>(getOldestLogTimeAndSequence(allLogs.value).timestamp) // 最旧的日志时间戳
 
   const filteredLogs = computed(() => {
     if (filterMode.value === 'NONE') {
@@ -295,11 +350,25 @@ export const useLogStore = defineStore('logStore', () => {
   const totalCount = computed(() => allLogs.value.length)
   const filteredCount = computed(() => filteredLogs.value.length)
 
-  // polling & history
-  
+  // polling
 
+  // sentinel
 
-  // group & filter
+  // history
+  const isFetchingHistory = ref(false)
+  const hasMoreHistory = ref(true)
+
+  // 使用通用方法插入日志（使用默认的 logComparator 和 onDuplicateId）
+  const insertLogsIntoCache = (newLogs: LogDataPacket[]) => {
+    insertLogsOrdered(
+      allLogs.value,
+      logIdSet.value,
+      newLogs
+      // 使用默认的 logComparator 和 onDuplicateId
+    )
+  }
+
+  // aggregation & filter
   const filterMode = ref<FilterMode>('NONE')
   const levelFilter = ref<string | null>(null)
   const userIdFilter = ref<string | null>(null)
@@ -330,7 +399,6 @@ export const useLogStore = defineStore('logStore', () => {
 
 
 
-
   
 
 
@@ -348,9 +416,6 @@ export const useLogStore = defineStore('logStore', () => {
   const isPollingError = ref(false)
   const retryCount = ref(0)
   const isPermanentError = ref(false)
-  const isFetchingHistory = ref(false)
-  const lastPolledTimestamp = ref<number>(getLatestLogTimeAndSequence(allLogs.value).timestamp)
-  const oldestLogTimestamp = ref<number>(getOldestLogTimeAndSequence(allLogs.value).timestamp)
 
   // 【新增】移动哨兵机制：用于检查 [oldestLogTimestamp, lastPolledTimestamp] 区间内的延迟上报日志
   // - sentinelTimestamp: 哨兵当前位置，从 oldestLogTimestamp 开始，逐步移动到 lastPolledTimestamp
@@ -359,9 +424,6 @@ export const useLogStore = defineStore('logStore', () => {
   const sentinelTimestamp = ref<number | null>(null);
   const sentinelPollCount = ref(0);
   const sentinelCooldownCount = ref(0);
-
-  // 基于实际加载历史数据的情况来判断是否还有更多历史
-  const hasMoreHistory = ref(true)
 
 
 
@@ -393,28 +455,16 @@ export const useLogStore = defineStore('logStore', () => {
     sentinelTimestamp.value = null;
     sentinelPollCount.value = 0;
     sentinelCooldownCount.value = 0; // 重置冷却状态
-  };
-
-    /**
-     * 获取过滤后日志的切片，用于虚拟滚动。
-     */
-  const getLogSlice = (start: number, size: number): LogDataPacket[] => {
-        return filteredLogs.value.slice(start, start + size);
     };
 
+
     /**
-     * 【已更新】模拟加载更旧的历史日志。使用时间范围查询和局部排序。
-   * 【重要更新】允许从最新端截断数据，但记录截断位置的时间戳，以便轮询时从截断位置继续。
-   * 【修复】如果加载历史数据后超出缓存上限，返回特殊值 -1 表示需要停止轮询。
+     * 加载更旧的历史日志。使用时间范围查询和局部排序。
+     * 【重要更新】允许从最新端截断数据，但记录截断位置的时间戳，以便轮询时从截断位置继续。
+     * 如果加载历史数据后超出缓存上限，从最新端截断数据，并返回特殊值 -1 表示需要停止轮询和哨兵。
      */
     const fetchOlderLogs = async (): Promise<number> => {
         if (!hasMoreHistory.value || isFetchingHistory.value) return 0;
-
-    // 【修复】如果缓存已接近上限，不允许加载历史，避免截断最新数据
-    if (allLogs.value.length >= MAX_CACHE_SIZE - 100) {
-      console.warn("缓存已满，无法加载更多历史日志。请先导出或清空部分数据。");
-      return -1; // 返回 -1 表示需要停止轮询
-    }
         
         isFetchingHistory.value = true;
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -448,46 +498,22 @@ export const useLogStore = defineStore('logStore', () => {
 
         if (uniqueOlderLogs.length > 0) {
             // 3. 局部插入和排序：处理旧日志与现有缓存开头的交错
-      insertLogsOrdered(uniqueOlderLogs);
+      insertLogsIntoCache(uniqueOlderLogs);
 
-      // 4. 【更新】溢出处理：如果插入后超过上限，从最新端移除，并记录截断位置的时间戳
+      // 4. 溢出处理：如果插入后超过上限，从最新端移除，并记录截断位置的时间戳
       if (allLogs.value.length > MAX_CACHE_SIZE) {
         const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
 
-        // 【修复】记录被截断位置的时间戳（截断前最新日志的时间戳），用于后续轮询从该位置继续
+        // 记录被截断位置的时间戳（截断前最新日志的时间戳），用于后续轮询从该位置继续
         // 确保数组不为空且索引有效
         if (allLogs.value.length > 0) {
           const lastLogBeforeTruncate = allLogs.value[allLogs.value.length - 1];
           if (lastLogBeforeTruncate) {
             lastPolledTimestamp.value = lastLogBeforeTruncate.timestamp;
-
-            // 【新增】初始化哨兵状态：当设置 lastPolledTimestamp 时，启动哨兵轮询机制
-            // 【重构】哨兵从 lastPolledTimestamp 开始，往更久远的时间递进检查
-            if (lastPolledTimestamp.value > oldestLogTimestamp.value) {
-              // 哨兵从 lastPolledTimestamp 开始，往更久远的时间递进检查
-              sentinelTimestamp.value = lastPolledTimestamp.value;
-              sentinelPollCount.value = 0;
-
-              const timeWindow =
-                lastPolledTimestamp.value - oldestLogTimestamp.value;
-              const sentinelEndTimestamp = Math.max(
-                oldestLogTimestamp.value,
-                lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
-              );
-              if (timeWindow > SENTINEL_TIME_WINDOW) {
-                console.log(
-                  `初始化哨兵状态，区间过大 (${timeWindow}ms > ${SENTINEL_TIME_WINDOW}ms)，哨兵将从 ${lastPolledTimestamp.value} 往更久远的时间递进检查到: ${sentinelEndTimestamp}`
-                );
-              } else {
-                console.log(
-                  `初始化哨兵状态，哨兵将从 ${lastPolledTimestamp.value} 往更久远的时间递进检查到: ${oldestLogTimestamp.value}`
-                );
-              }
-            }
           }
         }
 
-        // 【性能优化】从最新的日志（末尾）开始移除，同时更新 ID Set
+        // 从最新的日志（末尾）开始移除，同时更新 ID Set
         const removedLogs = allLogs.value.slice(MAX_CACHE_SIZE);
         removedLogs.forEach((log) => logIdSet.value.delete(log.id));
         allLogs.value.splice(MAX_CACHE_SIZE, logsToRemove);
@@ -495,7 +521,13 @@ export const useLogStore = defineStore('logStore', () => {
           `加载历史日志后缓存溢出，已移除 ${logsToRemove} 条最新日志。截断位置时间戳: ${lastPolledTimestamp.value}`
         );
 
-        // 【修复】返回 -1 表示超出缓存上限，需要停止轮询
+        // 停止哨兵：重置哨兵状态
+        sentinelTimestamp.value = null;
+        sentinelPollCount.value = 0;
+        sentinelCooldownCount.value = 0;
+        console.log(`缓存溢出，已停止哨兵检查`);
+
+        // 返回 -1 表示超出缓存上限，需要停止轮询（由调用方处理）
         isFetchingHistory.value = false;
         return -1;
             }
@@ -537,12 +569,298 @@ export const useLogStore = defineStore('logStore', () => {
     };
 
     /**
-     * 【已更新】模拟轮询获取新日志。使用局部排序。
-   * 【重要更新】如果存在 lastPolledTimestamp，从该位置继续轮询，避免重复查询。
-   * 每次轮询后更新 lastPolledTimestamp 为本次获取的最新日志时间戳。
+     * 哨兵检查：检查 [oldestLogTimestamp, lastPolledTimestamp] 区间内的延迟上报日志
+     * @returns 发现的延迟日志数组
+     */
+    const runSentinelCheck = async (): Promise<LogDataPacket[]> => {
+      const sentinelLogs: LogDataPacket[] = [];
+
+      // 当 lastPolledTimestamp 存在且大于 oldestLogTimestamp 时，说明存在需要检查的区间
+      if (
+        lastPolledTimestamp.value === null ||
+        lastPolledTimestamp.value <= oldestLogTimestamp.value
+      ) {
+        // 如果不存在需要检查的区间，重置哨兵状态
+        if (sentinelTimestamp.value !== null) {
+          console.log(`不存在需要检查的区间，重置哨兵状态。`);
+          sentinelTimestamp.value = null;
+          sentinelPollCount.value = 0;
+        }
+        return sentinelLogs;
+      }
+
+      // 计算哨兵检查的有效时间窗口
+      // 哨兵只检查最近 SENTINEL_TIME_WINDOW（1小时）时间内的延迟日志
+      const sentinelStartTimestamp = Math.max(
+        oldestLogTimestamp.value,
+        lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
+      );
+
+      // 如果区间超过时间窗口，说明区间太大，只检查最近的时间窗口
+      if (
+        lastPolledTimestamp.value - oldestLogTimestamp.value >
+        SENTINEL_TIME_WINDOW
+      ) {
+        if (
+          sentinelTimestamp.value === null ||
+          sentinelTimestamp.value < sentinelStartTimestamp
+        ) {
+          sentinelTimestamp.value = sentinelStartTimestamp;
+          console.log(
+            `区间过大 (${
+              lastPolledTimestamp.value - oldestLogTimestamp.value
+            }ms > ${SENTINEL_TIME_WINDOW}ms)，哨兵只检查最近时间窗口: [${sentinelStartTimestamp}, ${
+              lastPolledTimestamp.value
+            }]`
+          );
+        }
+      }
+
+      sentinelPollCount.value++;
+
+      // 如果哨兵处于冷却状态，减少冷却计数，跳过本次轮询
+      if (sentinelCooldownCount.value > 0) {
+        sentinelCooldownCount.value--;
+        if (sentinelCooldownCount.value === 0) {
+          console.log(`哨兵冷却时间结束，准备重新启动检查`);
+        }
+        return sentinelLogs;
+      }
+
+      // 每 SENTINEL_POLL_INTERVAL 次主轮询执行一次哨兵轮询
+      if (sentinelPollCount.value < SENTINEL_POLL_INTERVAL) {
+        return sentinelLogs;
+      }
+
+      sentinelPollCount.value = 0;
+
+      // 计算时间窗口的边界（最旧的时间点）
+      const sentinelEndTimestamp = Math.max(
+        oldestLogTimestamp.value,
+        lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
+      );
+
+      // 初始化哨兵位置：从 lastPolledTimestamp 开始
+      if (sentinelTimestamp.value === null) {
+        sentinelTimestamp.value = lastPolledTimestamp.value;
+        console.log(
+          `初始化哨兵位置: ${sentinelTimestamp.value}，将从该位置往更久远的时间递进检查到: ${sentinelEndTimestamp}`
+        );
+      }
+
+      // 如果 lastPolledTimestamp 已更新，且哨兵位置小于新的 lastPolledTimestamp，更新哨兵位置
+      if (sentinelTimestamp.value < lastPolledTimestamp.value) {
+        sentinelTimestamp.value = lastPolledTimestamp.value;
+        console.log(
+          `lastPolledTimestamp 已更新到: ${lastPolledTimestamp.value}，哨兵位置已更新`
+        );
+      }
+
+      // 如果哨兵位置还未达到时间窗口边界，执行哨兵轮询
+      if (sentinelTimestamp.value <= sentinelEndTimestamp) {
+        // 哨兵位置已经达到或超过时间窗口边界，检查是否需要重置哨兵状态
+        const currentTimeWindow =
+          lastPolledTimestamp.value - oldestLogTimestamp.value;
+
+        if (currentTimeWindow > SENTINEL_TIME_WINDOW) {
+          // 设置冷却时间，等待 SENTINEL_COOLDOWN_INTERVAL 次主轮询后再重新启动
+          sentinelCooldownCount.value = SENTINEL_COOLDOWN_INTERVAL;
+          sentinelTimestamp.value = null;
+          console.log(
+            `哨兵已完成一轮检查（从 ${
+              lastPolledTimestamp.value
+            } 检查到 ${sentinelEndTimestamp}），但区间仍然很大 (${currentTimeWindow}ms > ${SENTINEL_TIME_WINDOW}ms)，设置冷却时间 ${SENTINEL_COOLDOWN_INTERVAL} 次主轮询（约 ${
+              (SENTINEL_COOLDOWN_INTERVAL * POLL_INTERVAL_BASE) / 1000
+            } 秒）`
+          );
+        } else {
+          // 区间已经缩小到时间窗口内，重置哨兵状态
+          console.log(`哨兵已完成区间检查，重置哨兵状态。`);
+          sentinelTimestamp.value = null;
+          sentinelPollCount.value = 0;
+          sentinelCooldownCount.value = 0;
+        }
+        return sentinelLogs;
+      }
+
+      // 执行哨兵轮询
+      try {
+        // 查询从 sentinelTimestamp 往前 SENTINEL_TIME_STEP 时间范围内的日志
+        const queryStartTime = Math.max(
+          sentinelEndTimestamp,
+          sentinelTimestamp.value - SENTINEL_TIME_STEP
+        );
+        const queryEndTime = sentinelTimestamp.value;
+
+        // 使用 pullOlderLogsMockAPI 查询更久远的日志
+        const sentinelFetchedLogs = pullOlderLogsMockAPI(
+          queryStartTime,
+          queryEndTime,
+          SENTINEL_QUERY_LIMIT
+        );
+
+        // 过滤出在查询范围内的日志
+        const sentinelLogsInRange = sentinelFetchedLogs.filter(
+          (log) =>
+            log.timestamp > queryStartTime &&
+            log.timestamp <= queryEndTime
+        );
+
+        if (sentinelLogsInRange.length > 0) {
+          // 对哨兵日志进行去重和排序
+          const seenIdsInSentinelBatch = new Set<number>();
+          const uniqueSentinelLogsInBatch = sentinelLogsInRange.filter(
+            (log) => {
+              if (seenIdsInSentinelBatch.has(log.id)) {
+                return false;
+              }
+              seenIdsInSentinelBatch.add(log.id);
+              return true;
+            }
+          );
+          uniqueSentinelLogsInBatch.sort(logComparator);
+
+          // 与缓存中的日志去重
+          const uniqueSentinelLogs = uniqueSentinelLogsInBatch.filter(
+            (log) => !logIdSet.value.has(log.id)
+          );
+
+          if (uniqueSentinelLogs.length > 0) {
+            console.log(
+              `哨兵轮询发现 ${
+                uniqueSentinelLogs.length
+              } 条延迟上报的日志，时间范围: [${
+                uniqueSentinelLogs[0].timestamp
+              }, ${
+                uniqueSentinelLogs[uniqueSentinelLogs.length - 1].timestamp
+              }]`
+            );
+
+                    // 插入到缓存中
+                    insertLogsIntoCache(uniqueSentinelLogs);
+
+            // 更新哨兵位置为本次查询的最旧日志时间戳（往前递进）
+            const oldestSentinelLog = uniqueSentinelLogs[0];
+            sentinelTimestamp.value = oldestSentinelLog.timestamp;
+
+            sentinelLogs.push(...uniqueSentinelLogs);
+          } else {
+            // 没有新日志，将哨兵位置往前移动一个时间步长
+            sentinelTimestamp.value = queryStartTime;
+          }
+        } else {
+          // 没有在查询范围内的日志，将哨兵位置往前移动一个时间步长
+          sentinelTimestamp.value = queryStartTime;
+        }
+
+        // 如果哨兵位置已经达到或超过时间窗口边界，检查是否需要重置哨兵状态
+        if (sentinelTimestamp.value <= sentinelEndTimestamp) {
+          const currentTimeWindow =
+            lastPolledTimestamp.value - oldestLogTimestamp.value;
+
+          if (currentTimeWindow > SENTINEL_TIME_WINDOW) {
+            // 设置冷却时间，等待 SENTINEL_COOLDOWN_INTERVAL 次主轮询后再重新启动
+            sentinelCooldownCount.value = SENTINEL_COOLDOWN_INTERVAL;
+            sentinelTimestamp.value = null;
+            console.log(
+              `哨兵已完成一轮检查（从 ${
+                lastPolledTimestamp.value
+              } 检查到 ${sentinelEndTimestamp}），但区间仍然很大 (${currentTimeWindow}ms > ${SENTINEL_TIME_WINDOW}ms)，设置冷却时间 ${SENTINEL_COOLDOWN_INTERVAL} 次主轮询（约 ${
+                (SENTINEL_COOLDOWN_INTERVAL * POLL_INTERVAL_BASE) / 1000
+              } 秒）`
+            );
+          } else {
+            // 区间已经缩小到时间窗口内，重置哨兵状态
+            console.log(
+              `哨兵已完成区间检查，重置哨兵状态。oldestLogTimestamp: ${oldestLogTimestamp.value}, lastPolledTimestamp: ${lastPolledTimestamp.value}`
+            );
+            sentinelTimestamp.value = null;
+            sentinelPollCount.value = 0;
+            sentinelCooldownCount.value = 0;
+          }
+        }
+      } catch (error) {
+        console.warn(`哨兵轮询失败:`, error);
+        // 哨兵轮询失败不影响主轮询，继续执行
+      }
+
+      return sentinelLogs;
+    };
+
+    /**
+     * 处理缓存溢出：从最旧端移除日志
+     */
+    const handleCacheOverflow = () => {
+      if (allLogs.value.length <= MAX_CACHE_SIZE) {
+        return;
+      }
+
+      const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
+      // 从最旧的日志（开头）开始移除，同时更新 ID Set
+      const removedLogs = allLogs.value.slice(0, logsToRemove);
+      removedLogs.forEach((log) => logIdSet.value.delete(log.id));
+      allLogs.value.splice(0, logsToRemove);
+
+      // 更新历史游标
+      if (allLogs.value.length > 0) {
+        // 更新 oldestLogTimestamp 为新的最旧日志的时间戳
+        oldestLogTimestamp.value = allLogs.value[0].timestamp;
+
+        // 如果哨兵位置小于新的 oldestLogTimestamp，更新哨兵位置
+        // 考虑时间窗口限制，哨兵位置应该从有效时间窗口的起始位置开始
+        if (
+          sentinelTimestamp.value !== null &&
+          lastPolledTimestamp.value !== null
+        ) {
+          const sentinelStartTimestamp = Math.max(
+            oldestLogTimestamp.value,
+            lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
+          );
+          if (sentinelTimestamp.value < sentinelStartTimestamp) {
+            console.log(
+              `哨兵位置 (${sentinelTimestamp.value}) 小于有效时间窗口起始位置 (${sentinelStartTimestamp})，更新哨兵位置`
+            );
+            sentinelTimestamp.value = sentinelStartTimestamp;
+          }
+        } else if (
+          sentinelTimestamp.value !== null &&
+          sentinelTimestamp.value < oldestLogTimestamp.value
+        ) {
+          console.log(
+            `哨兵位置 (${sentinelTimestamp.value}) 小于新的 oldestLogTimestamp (${oldestLogTimestamp.value})，更新哨兵位置`
+          );
+          sentinelTimestamp.value = oldestLogTimestamp.value;
+        }
+
+        // 确保 lastPolledTimestamp 不会小于 oldestLogTimestamp
+        // 如果 lastPolledTimestamp 存在且小于新的 oldestLogTimestamp，说明它指向的日志已被移除
+        // 应该清除它，恢复正常轮询
+        if (
+          lastPolledTimestamp.value !== null &&
+          lastPolledTimestamp.value < oldestLogTimestamp.value
+        ) {
+          console.warn(
+            `lastPolledTimestamp (${lastPolledTimestamp.value}) 小于 oldestLogTimestamp (${oldestLogTimestamp.value})，清除 lastPolledTimestamp`
+          );
+          lastPolledTimestamp.value = null;
+          // 清除 lastPolledTimestamp 时，重置哨兵状态
+          sentinelTimestamp.value = null;
+          sentinelPollCount.value = 0;
+        }
+      } else {
+        oldestLogTimestamp.value = Date.now(); // 缓存为空则重置
+        // 缓存为空时，清除 lastPolledTimestamp
+        lastPolledTimestamp.value = null;
+      }
+    };
+
+    /**
+     * 轮询获取新日志并同步到缓存
+     * 【重要更新】如果存在 lastPolledTimestamp，从该位置继续轮询，避免重复查询。
+     * 每次轮询后更新 lastPolledTimestamp 为本次获取的最新日志时间戳。
      * 溢出时从最旧日志端 (开头) 移除，并更新 oldestLogTimestamp。
      */
-  const pullAndProcessLogs = async (): Promise<{
+  const pollNewLogs = async (): Promise<{
     newLogs: LogDataPacket[];
     nextDelay: number;
   }> => {
@@ -558,7 +876,7 @@ export const useLogStore = defineStore('logStore', () => {
         setTimeout(resolve, 50 + Math.random() * 100)
       );
 
-      // 【简化】获取查询起点：如果存在 lastPolledTimestamp，从该位置继续；否则从缓存最新位置开始
+      // 获取查询起点：如果存在 lastPolledTimestamp，从该位置继续；否则从缓存最新位置开始
       let sinceTimestamp: number;
       if (lastPolledTimestamp.value !== null) {
         // 从上次轮询的位置继续，避免重复查询
@@ -573,7 +891,7 @@ export const useLogStore = defineStore('logStore', () => {
             // 模拟 API 调用
             const fetchedLogs = pullNewLogsMockAPI(sinceTimestamp, POLLING_LIMIT);
             
-      // 【修复】去重和排序
+      // 去重和排序
       // 先对 fetchedLogs 内部去重（分布式场景下，同一批日志可能有重复 ID）
       const seenIdsInBatch = new Set<number>();
       const uniqueFetchedLogsInBatch = fetchedLogs.filter((log) => {
@@ -588,41 +906,38 @@ export const useLogStore = defineStore('logStore', () => {
       // 对去重后的日志进行排序
       uniqueFetchedLogsInBatch.sort(logComparator);
 
-      // 【性能优化】与缓存中的日志去重，使用维护的 logIdSet 而不是每次都创建新的 Set
+      // 与缓存中的日志去重，使用维护的 logIdSet 而不是每次都创建新的 Set
       uniqueNewLogs = uniqueFetchedLogsInBatch.filter(
         (log) => !logIdSet.value.has(log.id)
       );
 
             if (uniqueNewLogs.length > 0) {
-                // 1. 局部插入和排序：处理新日志与现有缓存末尾的交错
-        insertLogsOrdered(uniqueNewLogs);
+                // 局部插入和排序：处理新日志与现有缓存末尾的交错
+        insertLogsIntoCache(uniqueNewLogs);
 
-        // 2. 【更新】更新已轮询到的最新时间戳（使用本次获取的最新日志的时间戳）
-        // 【修复】确保数组不为空
-        if (uniqueNewLogs.length > 0) {
-          const latestNewLog = uniqueNewLogs[uniqueNewLogs.length - 1];
-          const previousPolledTimestamp = lastPolledTimestamp.value;
-          lastPolledTimestamp.value = latestNewLog.timestamp;
-          console.log(
-            `轮询成功，更新已轮询时间戳: ${lastPolledTimestamp.value}`
-          );
+        // 更新已轮询到的最新时间戳（使用本次获取的最新日志的时间戳）
+        const latestNewLog = uniqueNewLogs[uniqueNewLogs.length - 1];
+        const previousPolledTimestamp = lastPolledTimestamp.value;
+        lastPolledTimestamp.value = latestNewLog.timestamp;
+        console.log(
+          `轮询成功，更新已轮询时间戳: ${lastPolledTimestamp.value}`
+        );
 
-          // 3. 【检查】如果之前存在 lastPolledTimestamp（说明正在追回数据），
-          // 且本次获取的日志时间戳已经接近当前时间（说明已经追回所有数据），
-          // 可以清除 lastPolledTimestamp，恢复正常轮询（从缓存最新位置开始）
-          if (previousPolledTimestamp !== null) {
-            const now = Date.now();
-            const timeDiff = now - lastPolledTimestamp.value;
-            // 如果最新日志时间戳已经接近当前时间（差距小于轮询间隔的2倍），说明已经追回
-            if (timeDiff < POLL_INTERVAL_BASE * 2) {
-              console.log(
-                `已追回所有数据，恢复正常轮询。最新日志时间戳: ${lastPolledTimestamp.value}, 当前时间: ${now}`
-              );
-              lastPolledTimestamp.value = null;
-              // 【新增】清除 lastPolledTimestamp 时，重置哨兵状态
-              sentinelTimestamp.value = null;
-              sentinelPollCount.value = 0;
-            }
+        // 如果之前存在 lastPolledTimestamp（说明正在追回数据），
+        // 且本次获取的日志时间戳已经接近当前时间（说明已经追回所有数据），
+        // 可以清除 lastPolledTimestamp，恢复正常轮询（从缓存最新位置开始）
+        if (previousPolledTimestamp !== null) {
+          const now = Date.now();
+          const timeDiff = now - lastPolledTimestamp.value;
+          // 如果最新日志时间戳已经接近当前时间（差距小于轮询间隔的2倍），说明已经追回
+          if (timeDiff < POLL_INTERVAL_BASE * 2) {
+            console.log(
+              `已追回所有数据，恢复正常轮询。最新日志时间戳: ${lastPolledTimestamp.value}, 当前时间: ${now}`
+            );
+            lastPolledTimestamp.value = null;
+            // 清除 lastPolledTimestamp 时，重置哨兵状态
+            sentinelTimestamp.value = null;
+            sentinelPollCount.value = 0;
           }
         }
       } else {
@@ -645,290 +960,16 @@ export const useLogStore = defineStore('logStore', () => {
             isPollingError.value = false;
             retryCount.value = 0; 
 
-      // 【新增】移动哨兵轮询：检查 [oldestLogTimestamp, lastPolledTimestamp] 区间内的延迟上报日志
-      // 【优化】限制检查时间窗口，避免区间无限扩大
-      // 当 lastPolledTimestamp 存在且大于 oldestLogTimestamp 时，说明存在需要检查的区间
-      if (
-        lastPolledTimestamp.value !== null &&
-        lastPolledTimestamp.value > oldestLogTimestamp.value
-      ) {
-        // 【优化】计算哨兵检查的有效时间窗口
-        // 哨兵只检查最近 SENTINEL_TIME_WINDOW（1小时）时间内的延迟日志，而不是整个区间
-        // 时间窗口是相对于 lastPolledTimestamp 的，这意味着：
-        // - 如果主轮询每次都能获取到新日志，lastPolledTimestamp 会不断更新
-        // - 如果主轮询获取的日志时间跨度很大（比如一次获取了 3 小时的日志），
-        //   那么 lastPolledTimestamp 会往前推进 3 小时，时间窗口也会往前推进 3 小时
-        // - 哨兵每 3 次主轮询执行一次，会检查相对于当前 lastPolledTimestamp 的最近 1 小时
-        // - 这样可以确保哨兵总是检查最新的 1 小时窗口，不会遗漏延迟上报的日志
-        const sentinelStartTimestamp = Math.max(
-          oldestLogTimestamp.value,
-          lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
-        );
-
-        // 【优化】如果区间超过时间窗口，说明区间太大，直接重置哨兵状态
-        // 这样可以避免检查过大的区间，提高效率
-        if (
-          lastPolledTimestamp.value - oldestLogTimestamp.value >
-          SENTINEL_TIME_WINDOW
-        ) {
-          // 区间太大，只检查最近的时间窗口
-          if (
-            sentinelTimestamp.value === null ||
-            sentinelTimestamp.value < sentinelStartTimestamp
-          ) {
-            sentinelTimestamp.value = sentinelStartTimestamp;
-            console.log(
-              `区间过大 (${
-                lastPolledTimestamp.value - oldestLogTimestamp.value
-              }ms > ${SENTINEL_TIME_WINDOW}ms)，哨兵只检查最近时间窗口: [${sentinelStartTimestamp}, ${
-                lastPolledTimestamp.value
-              }]`
-            );
-          }
-        }
-
-        sentinelPollCount.value++;
-
-        // 【新增】如果哨兵处于冷却状态，减少冷却计数，跳过本次轮询
-        if (sentinelCooldownCount.value > 0) {
-          sentinelCooldownCount.value--;
-          if (sentinelCooldownCount.value === 0) {
-            console.log(`哨兵冷却时间结束，准备重新启动检查`);
-          }
-          // 冷却期间不执行哨兵轮询
-        } else {
-          // 每 SENTINEL_POLL_INTERVAL 次主轮询执行一次哨兵轮询
-          if (sentinelPollCount.value >= SENTINEL_POLL_INTERVAL) {
-            sentinelPollCount.value = 0;
-
-            // 【重构】哨兵从 lastPolledTimestamp 开始，往更久远的时间递进检查
-            // 计算时间窗口的边界（最旧的时间点）
-            const sentinelEndTimestamp = Math.max(
-              oldestLogTimestamp.value,
-              lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
-            );
-
-            // 初始化哨兵位置：从 lastPolledTimestamp 开始
-            if (sentinelTimestamp.value === null) {
-              sentinelTimestamp.value = lastPolledTimestamp.value;
-              console.log(
-                `初始化哨兵位置: ${sentinelTimestamp.value}，将从该位置往更久远的时间递进检查到: ${sentinelEndTimestamp}`
-              );
-            }
-
-            // 【优化】如果 lastPolledTimestamp 已更新，且哨兵位置小于新的 lastPolledTimestamp，更新哨兵位置
-            // 这样可以确保哨兵始终从最新的 lastPolledTimestamp 开始检查
-            if (sentinelTimestamp.value < lastPolledTimestamp.value) {
-              sentinelTimestamp.value = lastPolledTimestamp.value;
-              console.log(
-                `lastPolledTimestamp 已更新到: ${lastPolledTimestamp.value}，哨兵位置已更新`
-              );
-            }
-
-            // 如果哨兵位置还未达到时间窗口边界，执行哨兵轮询
-            if (sentinelTimestamp.value > sentinelEndTimestamp) {
-              try {
-                // 查询从 sentinelTimestamp 往前 SENTINEL_TIME_STEP 时间范围内的日志
-                const queryStartTime = Math.max(
-                  sentinelEndTimestamp,
-                  sentinelTimestamp.value - SENTINEL_TIME_STEP
-                );
-                const queryEndTime = sentinelTimestamp.value;
-
-                // 使用 pullOlderLogsMockAPI 查询更久远的日志
-                const sentinelFetchedLogs = pullOlderLogsMockAPI(
-                  queryStartTime,
-                  queryEndTime,
-                  SENTINEL_QUERY_LIMIT
-                );
-
-                // 过滤出在查询范围内的日志
-                const sentinelLogsInRange = sentinelFetchedLogs.filter(
-                  (log) =>
-                    log.timestamp > queryStartTime &&
-                    log.timestamp <= queryEndTime
-                );
-
-                if (sentinelLogsInRange.length > 0) {
-                  // 对哨兵日志进行去重和排序
-                  const seenIdsInSentinelBatch = new Set<number>();
-                  const uniqueSentinelLogsInBatch = sentinelLogsInRange.filter(
-                    (log) => {
-                      if (seenIdsInSentinelBatch.has(log.id)) {
-                        return false;
-                      }
-                      seenIdsInSentinelBatch.add(log.id);
-                      return true;
-                    }
-                  );
-                  uniqueSentinelLogsInBatch.sort(logComparator);
-
-                  // 与缓存中的日志去重
-                  const uniqueSentinelLogs = uniqueSentinelLogsInBatch.filter(
-                    (log) => !logIdSet.value.has(log.id)
-                  );
-
-                  if (uniqueSentinelLogs.length > 0) {
-                    console.log(
-                      `哨兵轮询发现 ${
-                        uniqueSentinelLogs.length
-                      } 条延迟上报的日志，时间范围: [${
-                        uniqueSentinelLogs[0].timestamp
-                      }, ${
-                        uniqueSentinelLogs[uniqueSentinelLogs.length - 1]
-                          .timestamp
-                      }]`
-                    );
-
-                    // 插入到缓存中
-                    insertLogsOrdered(uniqueSentinelLogs);
-
-                    // 更新哨兵位置为本次查询的最旧日志时间戳（往前递进）
-                    const oldestSentinelLog = uniqueSentinelLogs[0];
-                    sentinelTimestamp.value = oldestSentinelLog.timestamp;
-
-                    // 将哨兵发现的日志也加入到返回结果中
-                    uniqueNewLogs = [
-                      ...uniqueNewLogs,
-                      ...uniqueSentinelLogs,
-                    ].sort(logComparator);
-                  } else {
-                    // 没有新日志，将哨兵位置往前移动一个时间步长
-                    sentinelTimestamp.value = queryStartTime;
-                  }
-                } else {
-                  // 没有在查询范围内的日志，将哨兵位置往前移动一个时间步长
-                  sentinelTimestamp.value = queryStartTime;
-                }
-
-                // 如果哨兵位置已经达到或超过时间窗口边界，检查是否需要重置哨兵状态
-                if (sentinelTimestamp.value <= sentinelEndTimestamp) {
-                  const currentTimeWindow =
-                    lastPolledTimestamp.value - oldestLogTimestamp.value;
-
-                  // 【优化】如果区间仍然很大（超过时间窗口），设置冷却时间，等待一段时间后再重新启动检查
-                  // 这样可以避免哨兵过于频繁地检查，特别是在主轮询获取的日志时间跨度很大的情况下
-                  if (currentTimeWindow > SENTINEL_TIME_WINDOW) {
-                    // 设置冷却时间，等待 SENTINEL_COOLDOWN_INTERVAL 次主轮询后再重新启动
-                    sentinelCooldownCount.value = SENTINEL_COOLDOWN_INTERVAL;
-                    sentinelTimestamp.value = null; // 暂时清空哨兵位置，等待冷却结束后重新初始化
-                    console.log(
-                      `哨兵已完成一轮检查（从 ${
-                        lastPolledTimestamp.value
-                      } 检查到 ${sentinelEndTimestamp}），但区间仍然很大 (${currentTimeWindow}ms > ${SENTINEL_TIME_WINDOW}ms)，设置冷却时间 ${SENTINEL_COOLDOWN_INTERVAL} 次主轮询（约 ${
-                        (SENTINEL_COOLDOWN_INTERVAL * POLL_INTERVAL_BASE) / 1000
-                      } 秒）`
-                    );
-                  } else {
-                    // 区间已经缩小到时间窗口内，重置哨兵状态
-                    console.log(
-                      `哨兵已完成区间检查，重置哨兵状态。oldestLogTimestamp: ${oldestLogTimestamp.value}, lastPolledTimestamp: ${lastPolledTimestamp.value}`
-                    );
-                    sentinelTimestamp.value = null;
-                    sentinelPollCount.value = 0;
-                    sentinelCooldownCount.value = 0; // 清除冷却状态
-                  }
-                }
-              } catch (error) {
-                console.warn(`哨兵轮询失败:`, error);
-                // 哨兵轮询失败不影响主轮询，继续执行
-              }
-            } else {
-              // 哨兵位置已经达到或超过时间窗口边界，检查是否需要重置哨兵状态
-              const currentTimeWindow =
-                lastPolledTimestamp.value - oldestLogTimestamp.value;
-
-              // 【优化】如果区间仍然很大（超过时间窗口），设置冷却时间，等待一段时间后再重新启动检查
-              if (currentTimeWindow > SENTINEL_TIME_WINDOW) {
-                // 设置冷却时间，等待 SENTINEL_COOLDOWN_INTERVAL 次主轮询后再重新启动
-                sentinelCooldownCount.value = SENTINEL_COOLDOWN_INTERVAL;
-                sentinelTimestamp.value = null; // 暂时清空哨兵位置，等待冷却结束后重新初始化
-                console.log(
-                  `哨兵已完成一轮检查（从 ${
-                    lastPolledTimestamp.value
-                  } 检查到 ${sentinelEndTimestamp}），但区间仍然很大 (${currentTimeWindow}ms > ${SENTINEL_TIME_WINDOW}ms)，设置冷却时间 ${SENTINEL_COOLDOWN_INTERVAL} 次主轮询（约 ${
-                    (SENTINEL_COOLDOWN_INTERVAL * POLL_INTERVAL_BASE) / 1000
-                  } 秒）`
-                );
-              } else {
-                // 区间已经缩小到时间窗口内，重置哨兵状态
-                console.log(`哨兵已完成区间检查，重置哨兵状态。`);
-                sentinelTimestamp.value = null;
-                sentinelPollCount.value = 0;
-                sentinelCooldownCount.value = 0; // 清除冷却状态
-              }
-            }
-          }
-        }
-      } else {
-        // 如果不存在需要检查的区间，重置哨兵状态
-        if (sentinelTimestamp.value !== null) {
-          console.log(`不存在需要检查的区间，重置哨兵状态。`);
-          sentinelTimestamp.value = null;
-          sentinelPollCount.value = 0;
-        }
+      // 执行哨兵检查
+      const sentinelLogs = await runSentinelCheck();
+      if (sentinelLogs.length > 0) {
+        // 将哨兵发现的日志也加入到返回结果中
+        uniqueNewLogs = [...uniqueNewLogs, ...sentinelLogs].sort(logComparator);
       }
 
-      // 2. 【溢出处理：从最旧端移除】
-      if (allLogs.value.length > MAX_CACHE_SIZE) {
-        const logsToRemove = allLogs.value.length - MAX_CACHE_SIZE;
-        // 【性能优化】从最旧的日志（开头）开始移除，同时更新 ID Set
-        const removedLogs = allLogs.value.slice(0, logsToRemove);
-        removedLogs.forEach((log) => logIdSet.value.delete(log.id));
-        allLogs.value.splice(0, logsToRemove);
+      // 处理缓存溢出
+      handleCacheOverflow(); 
 
-        // 3. 【更新历史游标】
-        if (allLogs.value.length > 0) {
-          // 更新 oldestLogTimestamp 为新的最旧日志的时间戳
-          oldestLogTimestamp.value = allLogs.value[0].timestamp;
-
-          // 【新增】如果哨兵位置小于新的 oldestLogTimestamp，更新哨兵位置
-          // 【优化】考虑时间窗口限制，哨兵位置应该从有效时间窗口的起始位置开始
-          if (
-            sentinelTimestamp.value !== null &&
-            lastPolledTimestamp.value !== null
-          ) {
-            const sentinelStartTimestamp = Math.max(
-              oldestLogTimestamp.value,
-              lastPolledTimestamp.value - SENTINEL_TIME_WINDOW
-            );
-            if (sentinelTimestamp.value < sentinelStartTimestamp) {
-              console.log(
-                `哨兵位置 (${sentinelTimestamp.value}) 小于有效时间窗口起始位置 (${sentinelStartTimestamp})，更新哨兵位置`
-              );
-              sentinelTimestamp.value = sentinelStartTimestamp;
-            }
-          } else if (
-            sentinelTimestamp.value !== null &&
-            sentinelTimestamp.value < oldestLogTimestamp.value
-          ) {
-            console.log(
-              `哨兵位置 (${sentinelTimestamp.value}) 小于新的 oldestLogTimestamp (${oldestLogTimestamp.value})，更新哨兵位置`
-            );
-            sentinelTimestamp.value = oldestLogTimestamp.value;
-          }
-
-          // 【修复】确保 lastPolledTimestamp 不会小于 oldestLogTimestamp
-          // 如果 lastPolledTimestamp 存在且小于新的 oldestLogTimestamp，说明它指向的日志已被移除
-          // 应该清除它，恢复正常轮询
-          if (
-            lastPolledTimestamp.value !== null &&
-            lastPolledTimestamp.value < oldestLogTimestamp.value
-          ) {
-            console.warn(
-              `lastPolledTimestamp (${lastPolledTimestamp.value}) 小于 oldestLogTimestamp (${oldestLogTimestamp.value})，清除 lastPolledTimestamp`
-            );
-            lastPolledTimestamp.value = null;
-            // 【新增】清除 lastPolledTimestamp 时，重置哨兵状态
-            sentinelTimestamp.value = null;
-            sentinelPollCount.value = 0;
-          }
-        } else {
-          oldestLogTimestamp.value = Date.now(); // 缓存为空则重置
-          // 缓存为空时，清除 lastPolledTimestamp
-          lastPolledTimestamp.value = null;
-        }
-      }
         } catch (error) {
             console.error("Polling failed:", error);
             isPollingError.value = true;
@@ -996,8 +1037,7 @@ export const useLogStore = defineStore('logStore', () => {
         clearAllLogs,
     clearLastPolledTimestamp,
         fetchOlderLogs,
-        pullAndProcessLogs,
-        getLogSlice,
+        pollNewLogs,
 
     // 【导出验证函数】用于验证日志的有序性和唯一性（开发/调试用）
     validateLogsOrderedAndUnique: () =>

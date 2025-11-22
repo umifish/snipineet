@@ -270,6 +270,7 @@
   } from "./config";
   import { Download, Delete, Loading } from "@element-plus/icons-vue";
 import { exportLogsToJson } from "../utils/export";
+import { sliceArray } from "../utils/array";
   
   const store = useLogStore();
   
@@ -462,7 +463,7 @@ let fitAddon: FitAddon | null = null;
       clampViewportStart();
     }
   
-    const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+    const logsToRender = sliceArray(store.filteredLogs, viewportStart.value, TERMINAL_SIZE);
   
     const wasAtBottom = isTerminalAtBottom.value;
   
@@ -628,7 +629,7 @@ let fitAddon: FitAddon | null = null;
         ? oldLogs[viewportStart.value].id
         : null;
   
-    const oldLogsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+    const oldLogsToRender = sliceArray(store.filteredLogs, viewportStart.value, TERMINAL_SIZE);
     const oldFirstLogId =
       oldLogsToRender.length > 0 ? oldLogsToRender[0].id : null;
   
@@ -665,7 +666,8 @@ let fitAddon: FitAddon | null = null;
   
       clampViewportStart();
   
-      const newLogsToRender = store.getLogSlice(
+      const newLogsToRender = sliceArray(
+        store.filteredLogs,
         viewportStart.value,
         TERMINAL_SIZE
       );
@@ -809,7 +811,7 @@ let fitAddon: FitAddon | null = null;
     }
   
     const wasInLiveMode = isLiveMode.value;
-    const { newLogs, nextDelay } = await store.pullAndProcessLogs();
+    const { newLogs, nextDelay } = await store.pollNewLogs();
   
     if (nextDelay === 0) {
       if (isPolling.value) {
