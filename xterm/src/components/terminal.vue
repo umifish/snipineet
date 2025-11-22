@@ -1,1443 +1,1253 @@
 <template>
-  <div class="terminal-wrapper">
-    <div class="control-bar">
-      <div class="filter-row">
-        <div class="input-group">
-          <span class="label">模式:</span>
-          <select class="mode-select" v-model="currentFilterMode">
-            <option value="ALL">交集 (ALL)</option>
-            <option value="NONE">无 (NONE)</option>
-            <option value="LEVEL">仅 Level</option>
-            <option value="GROUP_ID">仅 Group</option>
-            <option value="CLIENT_ID">仅 Client</option>
-            <option value="USER_ID">仅 User</option>
-          </select>
-        </div>
-
-        <select
-          class="common-select"
-          v-model="levelFilter"
-          :disabled="!isFilterActive('LEVEL')"
-          title="日志级别"
-        >
-          <option :value="null">Level: All</option>
-          <option value="ERROR">ERROR</option>
-          <option value="WARN">WARN</option>
-          <option value="INFO">INFO</option>
-          <option value="DEBUG">DEBUG</option>
-        </select>
-
-        <input
-          type="text"
-          placeholder="Group ID"
-          class="common-input"
-          v-model="groupIdFilter"
-          :disabled="!isFilterActive('GROUP_ID')"
-        />
-
-        <input
-          type="text"
-          placeholder="Client ID"
-          class="common-input"
-          v-model="clientIdFilter"
-          :disabled="!isFilterActive('CLIENT_ID')"
-        />
-
-        <label
-          class="checkbox-item filter-checkbox"
-          :class="{ disabled: !isFilterActive('USER_ID') }"
-        >
-          <input
-            type="checkbox"
-            :checked="isUserFiltered"
-            @change="handleUserFilterToggle"
-            :disabled="!isFilterActive('USER_ID')"
-          />
-          <span>User: Me ({{ CURRENT_USER }})</span>
-        </label>
-      </div>
-
-      <div class="action-row">
-        <div class="left-actions">
-          <label
-            class="checkbox-item"
-            v-if="isLiveMode && isPolling"
-            title="有新日志时自动滚动到底部"
-          >
-            <input type="checkbox" v-model="autoScroll" />
-            <span>锁定底部</span>
-          </label>
-        </div>
-
-        <div class="right-actions">
-          <button @click="store.exportAllLogs" class="btn-icon" title="下载">
-            💾
-          </button>
-          <button @click="clearView" class="btn-icon" title="清屏">🧹</button>
-
-          <button
-            v-if="
-              !isPolling &&
-              (!isCacheOverflowingInHistoryMode || store.isPermanentError)
-            "
-            @click="startPolling"
-            class="btn-action"
+    <div class="terminal-wrapper">
+      <!-- 控制栏 -->
+      <el-card class="control-bar" shadow="never" :body-style="{ padding: '10px 15px' }">
+        <el-row :gutter="10" class="filter-row">
+          <el-col :span="24">
+            <el-space wrap :size="10">
+              <div class="input-group">
+                <span class="label">模式:</span>
+                <el-select
+                  v-model="currentFilterMode"
+                  class="mode-select"
+                  size="small"
+                  style="width: 140px"
+                  @change="handleFilterModeChange"
+                >
+                  <el-option label="交集 (ALL)" value="ALL" />
+                  <el-option label="无 (NONE)" value="NONE" />
+                  <el-option label="仅 Level" value="LEVEL" />
+                  <el-option label="仅 Group" value="GROUP_ID" />
+                  <el-option label="仅 Client" value="CLIENT_ID" />
+                  <el-option label="仅 User" value="USER_ID" />
+                </el-select>
+              </div>
+  
+              <el-select
+                v-model="levelFilter"
+                :disabled="!isFilterActive('LEVEL')"
+                placeholder="Level: All"
+                size="small"
+                style="width: 120px"
+                @change="handleLevelFilterChange"
+              >
+                <el-option label="All" :value="null" />
+                <el-option label="ERROR" value="ERROR" />
+                <el-option label="WARN" value="WARN" />
+                <el-option label="INFO" value="INFO" />
+                <el-option label="DEBUG" value="DEBUG" />
+              </el-select>
+  
+              <el-input
+                v-model="groupIdFilter"
+                placeholder="Group ID"
+                :disabled="!isFilterActive('GROUP_ID')"
+                size="small"
+                style="width: 90px"
+                clearable
+                @input="handleGroupFilterChange"
+              />
+  
+              <el-input
+                v-model="clientIdFilter"
+                placeholder="Client ID"
+                :disabled="!isFilterActive('CLIENT_ID')"
+                size="small"
+                style="width: 90px"
+                clearable
+                @input="handleClientFilterChange"
+              />
+  
+              <el-checkbox
+                :checked="isUserFiltered"
+                :disabled="!isFilterActive('USER_ID')"
+                @change="handleUserFilterToggle"
+                class="filter-checkbox"
+              >
+                User: Me ({{ CURRENT_USER }})
+              </el-checkbox>
+            </el-space>
+          </el-col>
+        </el-row>
+  
+        <el-divider style="margin: 8px 0" />
+  
+        <el-row justify="space-between" align="middle">
+          <el-col :span="12">
+            <el-checkbox
+              v-if="isLiveMode && isPolling"
+              v-model="autoScroll"
+              size="small"
+            >
+              锁定底部
+            </el-checkbox>
+          </el-col>
+  
+          <el-col :span="12" style="text-align: right">
+            <el-space :size="8">
+              <el-button
+                :icon="Download"
+                circle
+                size="small"
+                @click="store.exportAllLogs"
+                title="下载"
+              />
+              <el-button
+                :icon="Delete"
+                circle
+                size="small"
+                @click="clearView"
+                title="清屏"
+              />
+  
+              <el-button
+                v-if="
+                  !isPolling &&
+                  (!isCacheOverflowingInHistoryMode || store.isPermanentError)
+                "
+                :type="store.isPermanentError ? 'danger' : 'success'"
+                size="small"
+                @click="startPolling"
+              >
+                {{
+                  store.isPermanentError
+                    ? "重试"
+                    : store.isPollingError
+                    ? "重试"
+                    : "启动"
+                }}
+              </el-button>
+  
+              <span v-if="isCacheOverflowingInHistoryMode" class="resume-hint">
+                滑动到底部恢复
+              </span>
+            </el-space>
+          </el-col>
+        </el-row>
+      </el-card>
+  
+      <!-- 状态栏 -->
+      <el-card class="header" shadow="never" :body-style="{ padding: '6px 15px' }">
+        <el-space :size="10">
+          <div
+            class="status-dot"
             :class="{
-              start: !store.isPermanentError,
-              'permanent-error': store.isPermanentError,
+              live: isPolling && isLiveMode && !store.isPollingError,
+              history: isPolling && !isLiveMode && !store.isPollingError,
+              error: store.isPollingError,
+              paused: !isPolling,
             }"
+          ></div>
+          <span class="title">{{ statusTitleText }}</span>
+          <span class="meta-info">
+            显示: {{ currentRangeText }} / 过滤: {{ store.filteredCount }} / 缓存:
+            {{ store.totalCount }}
+            <span
+              v-if="store.retryCount > 0 && !store.isPollingError"
+              class="retry-status"
+            >
+              (重试: {{ store.retryCount }})
+            </span>
+            <span v-if="store.isPollingError" class="log-gap-warning">
+              (⚠️ 失败)
+            </span>
+          </span>
+        </el-space>
+      </el-card>
+  
+      <!-- 时间轴滑块 -->
+      <el-card
+        v-if="store.filteredCount > 0 || store.totalCount === 0"
+        class="timeline-bar"
+        shadow="never"
+        :body-style="{ padding: '4px 15px' }"
+      >
+        <el-row :gutter="8" align="middle">
+          <el-col :span="4">
+            <span class="time-label">
+              <el-icon v-if="store.isFetchingHistory" class="is-loading">
+                <Loading />
+              </el-icon>
+              <el-button
+                v-else-if="store.hasMoreHistory && viewportStart === 0"
+                type="primary"
+                size="small"
+                @click="loadMoreHistory"
+              >
+                加载更旧
+              </el-button>
+              <span
+                v-else-if="!store.hasMoreHistory && viewportStart === 0"
+                class="no-more-history"
+              >
+                📜 最旧
+              </span>
+              <span v-else>最旧</span>
+            </span>
+          </el-col>
+  
+          <el-col :span="16">
+            <el-slider
+              v-if="isSliderNeeded"
+              v-model="viewportStart"
+              :min="0"
+              :max="maxSliderValue"
+              :step="1"
+              @change="handleSliderChange"
+              @input="handleSliderInteraction"
+            />
+            <div v-else class="slider-placeholder"></div>
+          </el-col>
+  
+          <el-col :span="4" style="text-align: right">
+            <span class="time-label">最新</span>
+          </el-col>
+        </el-row>
+      </el-card>
+  
+      <!-- 列头 -->
+      <div
+        class="column-header-wrapper"
+        :style="{ transform: 'translateX(' + horizontalScrollOffset + 'px)' }"
+      >
+        <div class="column-header">
+          <span class="col-timestamp">Timestamp</span>
+          <span class="col-service">Service Name</span>
+          <span class="col-user">User</span>
+          <span class="col-group">Group/Client</span>
+          <span class="col-level">Level</span>
+          <span class="col-message">Message</span>
+        </div>
+      </div>
+  
+      <!-- 终端容器 -->
+      <div class="term-box">
+        <div ref="terminalRef" class="xterm-container"></div>
+  
+        <transition name="fade">
+          <el-button
+            v-if="!isLiveMode && missedLogsCount > 0"
+            type="warning"
+            class="resume-btn"
+            @click="returnToLiveMode"
           >
-            {{
-              store.isPermanentError
-                ? "重试"
-                : store.isPollingError
-                ? "重试"
-                : "启动"
-            }}
-          </button>
-
-          <span v-if="isCacheOverflowingInHistoryMode" class="resume-hint">
-            滑动到底部恢复
-          </span>
-        </div>
-      </div>
-    </div>
-
-    <div class="header">
-      <div class="left-panel">
-        <div
-          class="status-dot"
-          :class="{
-            live: isPolling && isLiveMode && !store.isPollingError,
-            history: isPolling && !isLiveMode && !store.isPollingError,
-            error: store.isPollingError,
-            paused: !isPolling,
-          }"
-        ></div>
-        <span class="title">
-          {{ statusTitleText }}
-        </span>
-        <span class="meta-info">
-          显示: {{ currentRangeText }} / 过滤: {{ store.filteredCount }} / 缓存:
-          {{ store.totalCount }}
-          <span
-            v-if="store.retryCount > 0 && !store.isPollingError"
-            class="retry-status"
+            ⏩ 回到最新 (跳过 {{ missedLogsCount }} 条)
+          </el-button>
+        </transition>
+  
+        <transition name="fade">
+          <el-button
+            v-if="isLiveMode && !isTerminalAtBottom"
+            type="primary"
+            class="scroll-bottom-btn"
+            circle
+            @click="scrollToBottom"
+            title="滚动到日志底部"
           >
-            (重试: {{ store.retryCount }})
-          </span>
-          <span v-if="store.isPollingError" class="log-gap-warning">
-            (⚠️ 失败)
-          </span>
-        </span>
+            ⬇
+          </el-button>
+        </transition>
       </div>
     </div>
-
-    <div
-      class="timeline-bar"
-      v-if="store.filteredCount > 0 || store.totalCount === 0"
-    >
-      <span class="time-label">
-        <span v-if="store.isFetchingHistory" class="loading-status"
-          >⏳ 加载中...</span
-        >
-        <button
-          v-else-if="store.hasMoreHistory && viewportStart === 0"
-          @click="loadMoreHistory"
-          class="btn-load-history"
-        >
-          加载更旧
-        </button>
-
-        <span
-          v-else-if="!store.hasMoreHistory && viewportStart === 0"
-          class="no-more-history"
-          >📜 最旧</span
-        >
-        <span v-else>最旧</span>
-      </span>
-
-      <input
-        v-if="isSliderNeeded"
-        type="range"
-        min="0"
-        :max="maxSliderValue"
-        v-model.number="viewportStart"
-        @input="handleSliderInteraction"
-        @change="renderWindow"
-        class="history-slider"
-      />
-
-      <div v-else class="slider-placeholder"></div>
-
-      <span class="time-label">最新</span>
-    </div>
-
-    <div
-      class="column-header-wrapper"
-      :style="{ transform: 'translateX(' + horizontalScrollOffset + 'px)' }"
-    >
-      <div class="column-header">
-        <span class="col-timestamp">Timestamp</span>
-        <span class="col-service">Service Name</span>
-        <span class="col-user">User</span>
-        <span class="col-group">Group/Client</span>
-        <span class="col-level">Level</span>
-        <span class="col-message">Message</span>
-      </div>
-    </div>
-
-    <div class="term-box">
-      <div ref="terminalRef" class="xterm-container"></div>
-
-      <transition name="fade">
-        <div
-          v-if="!isLiveMode && missedLogsCount > 0"
-          class="resume-btn"
-          @click="returnToLiveMode"
-        >
-          ⏩ 回到最新 (跳过 {{ missedLogsCount }} 条)
-        </div>
-      </transition>
-
-      <transition name="fade">
-        <div
-          v-if="isLiveMode && !isTerminalAtBottom"
-          class="scroll-bottom-btn"
-          @click="scrollToBottom"
-          title="滚动到日志底部"
-        >
-          ⬇ 底部
-        </div>
-      </transition>
-    </div>
-  </div>
-</template>
-
-<script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
-import { Terminal } from "@xterm/xterm";
-import { CanvasAddon } from "@xterm/addon-canvas";
-import { FitAddon } from "xterm-addon-fit";
-import "@xterm/xterm/css/xterm.css";
-import {
-  useLogStore,
-  MAX_CACHE_SIZE,
-  type FilterMode,
-  shouldLogBeDisplayed,
-} from "../stores/logStore";
-
-const store = useLogStore();
-
+  </template>
+  
+  <script setup lang="ts">
+  import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+  import { Terminal } from "@xterm/xterm";
+  import { CanvasAddon } from "@xterm/addon-canvas";
+  import { FitAddon } from "@xterm/addon-fit";
+  import "@xterm/xterm/css/xterm.css";
+  import {
+    useLogStore,
+    isLogVisible,
+  } from "../stores/logStore";
+  import type { FilterMode } from "../stores/type";
+  import {
+    MAX_CACHE_SIZE,
+    TERMINAL_SIZE,
+    CURRENT_USER,
+    SCROLL_THRESHOLD,
+  } from "./config";
+  import { Download, Delete, Loading } from "@element-plus/icons-vue";
+  
+  const store = useLogStore();
+  
 const terminalRef = ref<HTMLElement | null>(null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
-let viewportElement: HTMLElement | null = null;
-
-const TERMINAL_SIZE = 2000;
-const CURRENT_USER = "admin";
-const SCROLL_THRESHOLD = 3;
-
-// ✨ 终端配置采用新的漂亮浅色主题 ✨
-const LOG_TERMINAL_CONFIG = {
-  scrollback: TERMINAL_SIZE,
+  let viewportElement: HTMLElement | null = null;
+  
+  // ✨ 终端配置采用新的漂亮浅色主题 ✨
+  const LOG_TERMINAL_CONFIG = {
+    scrollback: TERMINAL_SIZE,
   disableStdin: true,
-  convertEol: true,
-  rendererType: "canvas",
-  fontSize: 12,
-  fontFamily: "Menlo, Monaco, monospace",
+    convertEol: true,
+    rendererType: "canvas",
+    fontSize: 12,
+    fontFamily: "Menlo, Monaco, monospace",
   theme: {
-    background: "#FAFAFA", // 极浅灰色背景 (Soft White)
-    foreground: "#383A42", // 柔和深色文本 (Soft Black)
-    cursor: "#007ACC", // 强调蓝作为光标色
-
-    // 关键 ANSI 颜色 (配合 Store 中的格式化)
-    red: "#E4564A", // 温暖的错误红
-    yellow: "#9D7A00", // 深金色警告
-    green: "#50A14F", // 柔和的森林绿 (用于 INFO 级别)
-    blue: "#4078F2", // 明亮的标识蓝 (用于 User ID)
-    cyan: "#008C9E", // 深青色 (用于 Service Name)
-    magenta: "#A626A4", // 鲜艳的结构紫 (用于 Group/Client ID)
-    brightBlack: "#AAAAAA", // 中灰 (用于 Timestamp/Dim)
-  },
-};
-
-// === 状态 ===
-const isPolling = ref(true);
-const autoScroll = ref(true);
-const viewportStart = ref(0);
-let pollingTimeout: number | null = null;
-let debounceTimeout: number | null = null;
-
-const currentFilterMode = ref<FilterMode>("ALL");
-const levelFilter = ref<string | null>(null);
-const groupIdFilter = ref("");
-const clientIdFilter = ref("");
-
-const isWritingToTerminal = ref(false);
-const isTerminalAtBottom = ref(true);
-const horizontalScrollOffset = ref(0);
-
-// === 计算属性 (保持不变) ===
-const maxSliderValue = computed(() =>
-  Math.max(0, store.filteredCount - TERMINAL_SIZE)
-);
-const isSliderNeeded = computed(() => maxSliderValue.value > 0);
-const isLiveMode = computed(() => {
-  return viewportStart.value >= maxSliderValue.value - 1;
-});
-const missedLogsCount = computed(() => {
-  if (isLiveMode.value) return 0;
-  const endOfCurrentView = viewportStart.value + TERMINAL_SIZE;
-  return Math.max(0, store.filteredCount - endOfCurrentView);
-});
-const currentRangeText = computed(() => {
-  const start = Math.max(0, viewportStart.value);
-  const end = Math.min(start + TERMINAL_SIZE, store.filteredCount);
-  return `${start}-${end}`;
-});
-const isUserFiltered = computed(() => store.userIdFilter === CURRENT_USER);
-
-const isFilterActive = (
-  type: "LEVEL" | "GROUP_ID" | "CLIENT_ID" | "USER_ID"
-) => {
-  if (currentFilterMode.value === "NONE") return false;
-  if (currentFilterMode.value === "ALL") return true;
-  return currentFilterMode.value === type;
-};
-
-const isCacheOverflowingInHistoryMode = computed(() => {
-  return store.totalCount >= MAX_CACHE_SIZE - 50 && !isLiveMode.value;
-});
-
-const statusTitleText = computed(() => {
-  if (isPolling.value) {
-    if (isLiveMode.value) return "实时监控";
-    return "历史回溯";
-  }
-  if (store.isPollingError) return "轮询失败";
-  if (isCacheOverflowingInHistoryMode.value) return "已暂停";
-  return "已暂停";
-});
-
-// === 辅助函数：确保 viewportStart 在有效范围内 ===
-const clampViewportStart = () => {
-  const maxVal = maxSliderValue.value;
-  if (viewportStart.value > maxVal) {
-    viewportStart.value = maxVal;
-  }
-  if (viewportStart.value < 0) {
-    viewportStart.value = 0;
-  }
-};
-
-// === Xterm 逻辑 ===
-
-// 滚轮监听器：专用于快速捕捉用户向上滚动意图 (UNLOCK)
-const wheelListener = (e: WheelEvent) => {
-  // 【修复】在写入终端时抑制滚轮事件，避免触发不必要的状态更新
-  if (isWritingToTerminal.value) return;
-
-  if (e.deltaY < 0) {
-    if (isLiveMode.value && autoScroll.value) {
-      autoScroll.value = false;
-    }
-  }
-};
-
-// DOM Scroll 监听器：专用于快速捕捉用户滚动到底部的意图 (RE-LOCK) 或离开底部的意图 (UNLOCK)
-const domScrollListener = (e: Event) => {
-  // 【修复】在写入终端时抑制滚动事件，避免触发不必要的状态更新
-  if (isWritingToTerminal.value) return;
-
-  const target = e.target as HTMLElement;
-  if (!target || !isLiveMode.value) return;
-
-  // 检查是否滚动到底部。
-  const isAtBottomDOM =
-    target.scrollHeight - target.scrollTop <= target.clientHeight + 3;
-
-  // 【修复】同步更新 isTerminalAtBottom 状态
-  isTerminalAtBottom.value = isAtBottomDOM;
-
-  // 1. Re-Lock Logic (用户滚到底部时，如果未锁定，则锁定)
-  if (isAtBottomDOM && !autoScroll.value) {
-    autoScroll.value = true;
-  }
-
-  // 2. UNLOCK 逻辑 (用户离开了底部，且当前处于锁定状态，则取消锁定)
-  else if (!isAtBottomDOM && autoScroll.value) {
-    autoScroll.value = false;
-  }
-};
-
-// 横向滚动监听器 (保持不变)
-const horizontalScrollListener = (e: Event) => {
-  const target = e.target as HTMLElement;
-  if (target) {
-    horizontalScrollOffset.value = -target.scrollLeft;
-  }
-};
-
-const initTerminal = () => {
-  if (!terminalRef.value) return;
-  term = new Terminal(LOG_TERMINAL_CONFIG);
-  fitAddon = new FitAddon();
-  term.loadAddon(fitAddon);
-  term.loadAddon(new CanvasAddon());
-  term.open(terminalRef.value);
-  fitAddon.fit();
-
-  // 纵向滚动监听器 (用于处理 Xterm 内部的 baseY/viewportY 计算和状态更新)
-  term.onScroll(() => {
-    // 【修复】在写入终端时抑制滚动事件，避免触发不必要的状态更新
-    if (isWritingToTerminal.value) return;
-
-    if (!term || !isLiveMode.value) return;
-
-    const baseScroll = term.buffer.active.baseY;
-    const viewportScroll = term.buffer.active.viewportY;
-    const isAtBottom = viewportScroll >= baseScroll - SCROLL_THRESHOLD;
-
-    isTerminalAtBottom.value = isAtBottom;
-
-    // 离开底部，如果未通过 wheelListener/domScrollListener 触发，则在这里解锁
-    if (!isAtBottom && autoScroll.value) {
-      autoScroll.value = false;
-    }
-  });
-
-  // 监听 DOM 元素
-  viewportElement = terminalRef.value.querySelector(".xterm-viewport");
-  if (viewportElement) {
-    viewportElement.addEventListener("scroll", horizontalScrollListener);
-    // 注册 DOM scroll 监听器
-    viewportElement.addEventListener("scroll", domScrollListener);
-  }
-};
-
-const scrollToBottom = () => {
-  if (!term) return;
-  term.scrollToBottom();
-  autoScroll.value = true;
-  isTerminalAtBottom.value = true;
-};
-
-const renderWindow = () => {
-  if (!term) return;
-
-  // 【修复】确保 viewportStart 在有效范围内
-  // 注意：clampViewportStart 可能会调整 viewportStart，这可能会影响 isLiveMode
-  // 所以在调用 clampViewportStart 之前，先记录是否需要保持实时模式
-  const shouldBeInLiveMode = isLiveMode.value;
-  clampViewportStart();
-
-  // 【修复】如果之前应该在实时模式，但 clampViewportStart 后不在实时模式，强制设置为实时模式
-  if (shouldBeInLiveMode && !isLiveMode.value) {
-    viewportStart.value = maxSliderValue.value;
-    clampViewportStart();
-  }
-
-  const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
-
-  // 【新增】记录当前是否在底部，用于后续恢复滚动状态
-  const wasAtBottom = isTerminalAtBottom.value;
-
-  isWritingToTerminal.value = true;
-
-  // 【新增】检查是否需要清理超出 scrollback 的内容
-  // 由于使用 term.clear() 会清空所有内容，scrollback 会自动重置
-  // 但为了确保内容不超过 scrollback 限制，我们限制渲染的行数
-  const maxRenderLines = Math.min(logsToRender.length, TERMINAL_SIZE);
-  const logsToRenderLimited = logsToRender.slice(0, maxRenderLines);
-
-  term.clear();
-  const separator = "-".repeat(term.cols);
-  term.writeln(`\x1b[90m${separator}\x1b[0m`);
-  logsToRenderLimited.forEach((item) => term?.writeln(item.formattedMsg));
-
-  // 【修复】只在实时模式且自动滚动时才滚动到底部
-  // 如果不在实时模式或不在自动滚动状态，保持当前滚动位置（不滚动到底部）
-  if (isLiveMode.value && autoScroll.value) {
-    term.scrollToBottom();
-    isTerminalAtBottom.value = true;
-  } else if (isLiveMode.value) {
-    const base = term.buffer.active.baseY;
-    const view = term.buffer.active.viewportY;
-    isTerminalAtBottom.value = view >= base - SCROLL_THRESHOLD;
-  } else {
-    // 【新增】不在实时模式时，保持之前的滚动状态
-    // 由于 renderWindow 会清空并重新渲染，滚动位置会被重置
-    // 但由于我们使用的是 viewportStart 来控制显示的内容，内容位置应该已经正确了
-    // 我们只需要确保不自动滚动到底部即可
-    isTerminalAtBottom.value = wasAtBottom;
-  }
-
-  setTimeout(() => {
-    isWritingToTerminal.value = false;
-  }, 0);
-};
-
-const returnToLiveMode = () => {
-  console.log("returnToLiveMode 被调用", {
-    before: {
-      viewportStart: viewportStart.value,
-      maxSliderValue: maxSliderValue.value,
-      isLiveMode: isLiveMode.value,
-      isPolling: isPolling.value,
+      background: "#FAFAFA", // 极浅灰色背景 (Soft White)
+      foreground: "#383A42", // 柔和深色文本 (Soft Black)
+      cursor: "#007ACC", // 强调蓝作为光标色
+  
+      // 关键 ANSI 颜色 (配合 Store 中的格式化)
+      red: "#E4564A", // 温暖的错误红
+      yellow: "#9D7A00", // 深金色警告
+      green: "#50A14F", // 柔和的森林绿 (用于 INFO 级别)
+      blue: "#4078F2", // 明亮的标识蓝 (用于 User ID)
+      cyan: "#008C9E", // 深青色 (用于 Service Name)
+      magenta: "#A626A4", // 鲜艳的结构紫 (用于 Group/Client ID)
+      brightBlack: "#AAAAAA", // 中灰 (用于 Timestamp/Dim)
     },
+  };
+  
+  // === 状态 ===
+  const isPolling = ref(false); // 【修复】初始值改为 false，只有真正启动轮询后才设为 true
+  const autoScroll = ref(true);
+  const viewportStart = ref(0);
+  let pollingTimeout: number | null = null;
+  let debounceTimeout: number | null = null;
+  const isStartingPolling = ref(false); // 【新增】标记是否正在启动轮询，防止重复触发
+  
+  const currentFilterMode = ref<FilterMode>("ALL");
+  const levelFilter = ref<string | null>(null);
+  const groupIdFilter = ref("");
+  const clientIdFilter = ref("");
+  
+  const isWritingToTerminal = ref(false);
+  const isTerminalAtBottom = ref(true);
+  const horizontalScrollOffset = ref(0);
+  
+  // === 计算属性 ===
+  const maxSliderValue = computed(() =>
+    Math.max(0, store.filteredCount - TERMINAL_SIZE)
+  );
+  const isSliderNeeded = computed(() => maxSliderValue.value > 0);
+  const isLiveMode = computed(() => {
+    return viewportStart.value >= maxSliderValue.value - 1;
   });
-
-  // 【修复】确保 viewportStart 设置为最新位置
-  // 使用 nextTick 确保 computed 值正确更新
-  viewportStart.value = maxSliderValue.value;
-  clampViewportStart(); // 确保在有效范围内
-
-  // 【新增】验证 isLiveMode 是否正确更新
-  // 由于 isLiveMode 是 computed，它应该立即更新
-  // 但如果 maxSliderValue 为 0，isLiveMode 应该是 true（因为 0 >= 0 - 1 = -1）
-  // 如果 maxSliderValue 是负数，isLiveMode 也应该是 true（因为任何数 >= 负数 - 1）
-  if (!isLiveMode.value) {
-    console.warn("returnToLiveMode: isLiveMode 未正确更新，强制设置", {
-      viewportStart: viewportStart.value,
-      maxSliderValue: maxSliderValue.value,
-      isLiveMode: isLiveMode.value,
-      condition: `${viewportStart.value} >= ${maxSliderValue.value} - 1 = ${
-        maxSliderValue.value - 1
-      }`,
-    });
-    // 强制设置为最新位置，确保 isLiveMode 为 true
-    // 如果 maxSliderValue 是 0 或负数，设置为 0；否则设置为 maxSliderValue
-    viewportStart.value = Math.max(0, maxSliderValue.value);
-    // 再次验证
-    if (!isLiveMode.value) {
-      console.error("returnToLiveMode: isLiveMode 仍然未正确更新", {
-        viewportStart: viewportStart.value,
-        maxSliderValue: maxSliderValue.value,
-        isLiveMode: isLiveMode.value,
-      });
+  const missedLogsCount = computed(() => {
+    if (isLiveMode.value) return 0;
+    const endOfCurrentView = viewportStart.value + TERMINAL_SIZE;
+    return Math.max(0, store.filteredCount - endOfCurrentView);
+  });
+  const currentRangeText = computed(() => {
+    const start = Math.max(0, viewportStart.value);
+    const end = Math.min(start + TERMINAL_SIZE, store.filteredCount);
+    return `${start}-${end}`;
+  });
+  const isUserFiltered = computed(() => store.userIdFilter === CURRENT_USER);
+  
+  const isFilterActive = (
+    type: "LEVEL" | "GROUP_ID" | "CLIENT_ID" | "USER_ID"
+  ) => {
+    if (currentFilterMode.value === "NONE") return false;
+    if (currentFilterMode.value === "ALL") return true;
+    return currentFilterMode.value === type;
+  };
+  
+  const isCacheOverflowingInHistoryMode = computed(() => {
+    return store.totalCount >= MAX_CACHE_SIZE - 50 && !isLiveMode.value;
+  });
+  
+  const statusTitleText = computed(() => {
+    if (isPolling.value) {
+      if (isLiveMode.value) return "实时监控";
+      return "历史回溯";
     }
-  }
-
-  autoScroll.value = true;
-  isTerminalAtBottom.value = true;
-  renderWindow();
-
-  // 【修复】使用 nextTick 确保所有状态更新完成后再检查
-  nextTick(() => {
-    console.log("returnToLiveMode 完成 (nextTick)", {
-      after: {
+    if (store.isPollingError) return "轮询失败";
+    if (isCacheOverflowingInHistoryMode.value) return "已暂停";
+    return "已暂停";
+  });
+  
+  // === 辅助函数：确保 viewportStart 在有效范围内 ===
+  const clampViewportStart = () => {
+    const maxVal = maxSliderValue.value;
+    if (viewportStart.value > maxVal) {
+      viewportStart.value = maxVal;
+    }
+    if (viewportStart.value < 0) {
+      viewportStart.value = 0;
+    }
+  };
+  
+  // === Xterm 逻辑 ===
+  
+  // 滚轮监听器：专用于快速捕捉用户向上滚动意图 (UNLOCK)
+  const wheelListener = (e: WheelEvent) => {
+    if (isWritingToTerminal.value) return;
+  
+    if (e.deltaY < 0) {
+      if (isLiveMode.value && autoScroll.value) {
+        autoScroll.value = false;
+      }
+    }
+  };
+  
+  // DOM Scroll 监听器
+  const domScrollListener = (e: Event) => {
+    if (isWritingToTerminal.value) return;
+  
+    const target = e.target as HTMLElement;
+    if (!target || !isLiveMode.value) return;
+  
+    const isAtBottomDOM =
+      target.scrollHeight - target.scrollTop <= target.clientHeight + 3;
+  
+    isTerminalAtBottom.value = isAtBottomDOM;
+  
+    if (isAtBottomDOM && !autoScroll.value) {
+      autoScroll.value = true;
+    } else if (!isAtBottomDOM && autoScroll.value) {
+      autoScroll.value = false;
+    }
+  };
+  
+  // 横向滚动监听器
+  const horizontalScrollListener = (e: Event) => {
+    const target = e.target as HTMLElement;
+    if (target) {
+      horizontalScrollOffset.value = -target.scrollLeft;
+    }
+  };
+  
+  const initTerminal = () => {
+    if (!terminalRef.value) return;
+    term = new Terminal(LOG_TERMINAL_CONFIG);
+    fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new CanvasAddon());
+    term.open(terminalRef.value);
+    fitAddon.fit();
+  
+    term.onScroll(() => {
+      if (isWritingToTerminal.value) return;
+  
+      if (!term || !isLiveMode.value) return;
+  
+      const baseScroll = term.buffer.active.baseY;
+      const viewportScroll = term.buffer.active.viewportY;
+      const isAtBottom = viewportScroll >= baseScroll - SCROLL_THRESHOLD;
+  
+      isTerminalAtBottom.value = isAtBottom;
+  
+      if (!isAtBottom && autoScroll.value) {
+        autoScroll.value = false;
+      }
+    });
+  
+    viewportElement = terminalRef.value.querySelector(".xterm-viewport");
+    if (viewportElement) {
+      viewportElement.addEventListener("scroll", horizontalScrollListener);
+      viewportElement.addEventListener("scroll", domScrollListener);
+    }
+  };
+  
+  const scrollToBottom = () => {
+    if (!term) return;
+    term.scrollToBottom();
+    autoScroll.value = true;
+    isTerminalAtBottom.value = true;
+  };
+  
+  const renderWindow = () => {
+    if (!term) return;
+  
+    const shouldBeInLiveMode = isLiveMode.value;
+    clampViewportStart();
+  
+    if (shouldBeInLiveMode && !isLiveMode.value) {
+      viewportStart.value = maxSliderValue.value;
+      clampViewportStart();
+    }
+  
+    const logsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+  
+    const wasAtBottom = isTerminalAtBottom.value;
+  
+    isWritingToTerminal.value = true;
+  
+    const maxRenderLines = Math.min(logsToRender.length, TERMINAL_SIZE);
+    const logsToRenderLimited = logsToRender.slice(0, maxRenderLines);
+  
+    term.clear();
+    const separator = "-".repeat(term.cols);
+    term.writeln(`\x1b[90m${separator}\x1b[0m`);
+      logsToRenderLimited.forEach((item) => term?.writeln(item.formattedMessage));
+  
+    if (isLiveMode.value && autoScroll.value) {
+      term.scrollToBottom();
+      isTerminalAtBottom.value = true;
+    } else if (isLiveMode.value) {
+      const base = term.buffer.active.baseY;
+      const view = term.buffer.active.viewportY;
+      isTerminalAtBottom.value = view >= base - SCROLL_THRESHOLD;
+    } else {
+      isTerminalAtBottom.value = wasAtBottom;
+    }
+  
+    setTimeout(() => {
+      isWritingToTerminal.value = false;
+    }, 0);
+  };
+  
+  const returnToLiveMode = () => {
+    console.log("returnToLiveMode 被调用", {
+      before: {
         viewportStart: viewportStart.value,
         maxSliderValue: maxSliderValue.value,
         isLiveMode: isLiveMode.value,
         isPolling: isPolling.value,
-        missedLogsCount: missedLogsCount.value,
+        isStartingPolling: isStartingPolling.value,
       },
     });
 
-    // 【修复】如果处于实时模式且未在轮询，直接启动轮询
-    // 不依赖 watch(isLiveMode)，因为可能存在时序问题
-    // 注意：如果 startPolling 已经被调用（比如从按钮点击），这里不应该再次调用
-    // 检查 pollingTimeout 来判断是否已经在启动过程中
-    // 【关键修复】如果 isPolling 为 true 但 pollingTimeout 为 null，说明状态不一致，需要重置
-    if (isPolling.value && !pollingTimeout) {
-      console.warn(
-        "returnToLiveMode: 检测到状态不一致（isPolling=true 但 pollingTimeout=null），重置状态"
-      );
-      isPolling.value = false;
-    }
-
-    if (
-      isLiveMode.value &&
-      !isPolling.value &&
-      !pollingTimeout &&
-      !store.isPermanentError &&
-      !isCacheOverflowingInHistoryMode.value
-    ) {
-      console.log("returnToLiveMode: 直接启动轮询");
-      startPolling();
-    } else {
-      console.log("returnToLiveMode: 未启动轮询", {
-        isLiveMode: isLiveMode.value,
-        isPolling: isPolling.value,
-        pollingTimeout: pollingTimeout !== null,
-        isPermanentError: store.isPermanentError,
-        isCacheOverflowingInHistoryMode: isCacheOverflowingInHistoryMode.value,
-      });
-    }
-  });
-};
-
-// === 交互处理 (保持不变) ===
-const handleUserFilterToggle = () => {
-  if (isUserFiltered.value) {
-    store.setUserIdFilter(null);
-  } else {
-    store.setUserIdFilter(CURRENT_USER);
-  }
-};
-
-// 【修复】确保组件和 store 之间的双向同步
-watch(currentFilterMode, (mode) => {
-  store.setFilterMode(mode);
-  returnToLiveMode();
-});
-watch(
-  () => store.filterMode,
-  (mode) => {
-    if (currentFilterMode.value !== mode) {
-      currentFilterMode.value = mode;
-    }
-  }
-);
-
-watch(levelFilter, (val) => {
-  store.setLevelFilter(val);
-  returnToLiveMode();
-});
-watch(
-  () => store.levelFilter,
-  (val) => {
-    if (levelFilter.value !== val) {
-      levelFilter.value = val;
-    }
-  }
-);
-
-watch([groupIdFilter, clientIdFilter], ([newGroup, newClient]) => {
-  if (debounceTimeout) clearTimeout(debounceTimeout);
-  debounceTimeout = window.setTimeout(() => {
-    store.setGroupIdFilter(newGroup || null);
-    store.setClientIdFilter(newClient || null);
-    returnToLiveMode();
-  }, 300);
-});
-watch(
-  () => store.groupIdFilter,
-  (val) => {
-    const newVal = val || "";
-    if (groupIdFilter.value !== newVal) {
-      groupIdFilter.value = newVal;
-    }
-  }
-);
-watch(
-  () => store.clientIdFilter,
-  (val) => {
-    const newVal = val || "";
-    if (clientIdFilter.value !== newVal) {
-      clientIdFilter.value = newVal;
-    }
-  }
-);
-
-watch(
-  () => store.userIdFilter,
-  () => {
-    returnToLiveMode();
-  }
-);
-
-const loadMoreHistory = async () => {
-  if (!store.hasMoreHistory || store.isFetchingHistory || !term) return 0;
-
-  // 【修复】记录当前视窗顶部的日志 ID 作为锚点
-  const oldLogs = store.filteredLogs;
-  const currentAnchorId =
-    oldLogs.length > 0 && viewportStart.value < oldLogs.length
-      ? oldLogs[viewportStart.value].id
-      : null;
-
-  // 【新增】记录当前显示的日志范围，用于后续比较
-  const oldLogsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
-  const oldFirstLogId =
-    oldLogsToRender.length > 0 ? oldLogsToRender[0].id : null;
-
-  // 【新增】记录当前滚动位置（相对于视窗顶部）
-  const buffer = term.buffer.active;
-  const currentViewportY = buffer.viewportY;
-  const currentBaseY = buffer.baseY;
-  // 计算当前视窗顶部相对于缓冲区顶部的行数偏移
-  const scrollOffsetFromTop = currentBaseY - currentViewportY;
-
-  // 【新增】记录当前缓冲区的总行数，用于检查是否超出 scrollback
-  const currentBufferLength = buffer.length;
-
-  const logsAddedCount = await store.fetchOlderLogs();
-
-  // 【修复】如果返回 -1，表示超出缓存上限，需要停止轮询
-  if (logsAddedCount === -1) {
-    if (isPolling.value) {
-      stopPolling(true);
-    }
-    return 0;
-  }
-
-  if (logsAddedCount > 0) {
-    const newLogs = store.filteredLogs;
-
-    // 【修复】根据锚点重新计算 viewportStart
-    if (currentAnchorId) {
-      const newAnchorIndex = newLogs.findIndex(
-        (log) => log.id === currentAnchorId
-      );
-      if (newAnchorIndex !== -1) {
-        // 找到锚点，保持在同一位置
-        viewportStart.value = newAnchorIndex;
-      } else {
-        // 锚点丢失（可能被过滤掉了），使用添加的数量作为偏移
-        viewportStart.value = Math.min(logsAddedCount, maxSliderValue.value);
-      }
-    } else {
-      // 没有锚点，保持在顶部
-      viewportStart.value = 0;
-    }
-
-    // 【修复】确保 viewportStart 在有效范围内
+    viewportStart.value = maxSliderValue.value;
     clampViewportStart();
 
-    // 【关键修复】计算真正新增的日志（在 filteredLogs 中）
-    const newLogsToRender = store.getLogSlice(
-      viewportStart.value,
-      TERMINAL_SIZE
-    );
-
-    // 【修复】找出真正新增的日志：比较加载前后的 filteredLogs
-    // 新日志应该是在 oldLogs 中不存在的，且位于 newLogs 的开头
-    let actualNewLogs: typeof newLogsToRender = [];
-    if (oldFirstLogId && newLogsToRender.length > 0) {
-      // 找到 oldFirstLogId 在 newLogsToRender 中的位置
-      const oldFirstLogIndex = newLogsToRender.findIndex(
-        (log) => log.id === oldFirstLogId
-      );
-      if (oldFirstLogIndex > 0) {
-        // 在 oldFirstLogId 之前的都是新日志
-        actualNewLogs = newLogsToRender.slice(0, oldFirstLogIndex);
-      } else if (oldFirstLogIndex === -1) {
-        // oldFirstLogId 不在新列表中，说明所有日志都是新的（可能被过滤掉了）
-        // 这种情况下，我们需要重新渲染整个窗口
-        renderWindow();
-        return logsAddedCount;
-      }
-    } else if (newLogsToRender.length > 0 && oldLogsToRender.length === 0) {
-      // 之前没有日志，现在有日志，所有日志都是新的
-      actualNewLogs = newLogsToRender;
-    }
-
-    // 【关键修复】如果不在实时模式且有真正的新日志，使用增量更新
-    if (!isLiveMode.value && term && actualNewLogs.length > 0) {
-      const t = term; // 保存引用，避免 TypeScript 错误
-      const newLinesCount = actualNewLogs.length;
-
-      // 【新增】检查是否会超出 scrollback 限制
-      const maxScrollback = TERMINAL_SIZE;
-      const willExceedScrollback =
-        currentBufferLength + newLinesCount > maxScrollback;
-
-      if (willExceedScrollback) {
-        // 如果会超出 scrollback，使用完全重新渲染
-        // Xterm 的 scrollback 会自动清理超出限制的内容，但为了保持一致性，
-        // 我们使用完全重新渲染来确保内容正确
-        console.warn(
-          `增量更新会导致超出 scrollback 限制 (${
-            currentBufferLength + newLinesCount
-          } > ${maxScrollback})，使用完全重新渲染`
-        );
-        renderWindow();
-        return logsAddedCount;
-      }
-
-      // 使用增量更新：将现有内容向下滚动 newLinesCount 行
-      t.scrollLines(newLinesCount);
-
-      // 保存光标位置
-      t.write("\x1b[s");
-
-      // 移动到第一行
-      t.write("\x1b[H");
-
-      // 【修复】写入真正新增的日志行（确保顺序正确）
-      actualNewLogs.forEach((item, index) => {
-        if (index > 0) {
-          t.write("\r\n");
-        }
-        // 清除当前行并写入新内容
-        t.write("\x1b[2K"); // 清除整行
-        t.write("\r"); // 回到行首
-        t.write(item.formattedMsg);
-      });
-
-      // 恢复光标位置
-      t.write("\x1b[u");
-
-      // 更新状态：不在底部，不自动滚动
-      isTerminalAtBottom.value = false;
-      autoScroll.value = false;
-    } else {
-      // 在实时模式、没有新日志、或需要完全重新渲染时，使用 renderWindow
-      // 但需要恢复滚动位置
-      renderWindow();
-
-      // 【新增】恢复滚动位置：等待渲染完成后恢复
-      setTimeout(() => {
-        if (!term || isLiveMode.value) return;
-
-        const newBuffer = term.buffer.active;
-        const newBaseY = newBuffer.baseY;
-
-        // 计算目标滚动位置，保持相同的相对偏移
-        const targetViewportY = Math.max(0, newBaseY - scrollOffsetFromTop);
-        const currentViewportY = newBuffer.viewportY;
-        const scrollLines = targetViewportY - currentViewportY;
-
-        if (scrollLines !== 0) {
-          // 使用 scrollLines 来调整滚动位置
-          term.scrollLines(scrollLines);
-          isTerminalAtBottom.value = false;
-          autoScroll.value = false;
-        }
-      }, 0);
-    }
-  }
-
-  return logsAddedCount;
-};
-
-const handleSliderInteraction = () => {
-  // 【修复】拖动滑块时取消自动锁定，并确保 viewportStart 在有效范围内
-  autoScroll.value = false;
-  clampViewportStart();
-
-  // 【新增】如果滑块滑到最新位置，且当前未轮询，则启动轮询
-  // 注意：这里不直接调用 startPolling，而是依赖 watch(isLiveMode) 来启动
-  // 因为 watch(isLiveMode) 会检查 isCacheOverflowingInHistoryMode
-};
-
-const clearView = () => {
-  store.clearAllLogs();
-  term?.clear();
-};
-
-watch(autoScroll, (newValue) => {
-  // 【修复】移除冗余检查，当 autoScroll 为 true 且处于 Live Mode 时，滚动到底部
-  if (newValue && isLiveMode.value) {
-    term?.scrollToBottom();
-    isTerminalAtBottom.value = true;
-  }
-});
-
-const runCycle = async () => {
-  // 【修复】检查是否应该继续轮询
-  // 只有在历史模式且缓存溢出时才停止轮询
-  // 如果处于实时模式，即使缓存溢出也应该继续轮询（因为用户正在查看最新日志）
-  if (isCacheOverflowingInHistoryMode.value) {
-    if (isPolling.value) {
-      console.log("停止轮询：缓存溢出且在历史模式", {
-        totalCount: store.totalCount,
-        maxCacheSize: MAX_CACHE_SIZE,
-        isLiveMode: isLiveMode.value,
-        viewportStart: viewportStart.value,
-        maxSliderValue: maxSliderValue.value,
-      });
-      stopPolling(true);
-    }
-    return;
-  }
-
-  // 【修复】如果超过最大重试次数，停止轮询
-  if (store.isPermanentError) {
-    if (isPolling.value) {
-      console.log("停止轮询：超过最大重试次数");
-      stopPolling(true);
-    }
-    return;
-  }
-
-  // 【关键修复】确保 isPolling 为 true 时才继续
-  if (!isPolling.value) {
-    console.log("runCycle: isPolling 为 false，停止执行");
-    return;
-  }
-
-  const wasInLiveMode = isLiveMode.value;
-  const { newLogs, nextDelay } = await store.pullAndProcessLogs();
-
-  // 【修复】如果 nextDelay 为 0，表示需要停止轮询（超过最大重试次数）
-  if (nextDelay === 0) {
-    if (isPolling.value) {
-      stopPolling(true);
-    }
-    return;
-  }
-
-  if (wasInLiveMode) {
-    // 【修复】再次检查是否仍在 Live Mode（用户可能在异步操作期间切换了模式）
     if (!isLiveMode.value) {
-      // 如果已经切换到历史模式，不追加日志，直接返回
-      if (isPolling.value) {
-        pollingTimeout = window.setTimeout(
-          runCycle,
-          nextDelay
-        ) as unknown as number;
-      }
-      return;
-    }
-
-    viewportStart.value = maxSliderValue.value;
-    if (!store.isPollingError && newLogs.length > 0) {
-      // 使用通用的 shouldLogBeDisplayed 函数进行过滤
-      const itemsToRender = newLogs.filter((item) =>
-        shouldLogBeDisplayed(
-          item,
-          store.filterMode,
-          store.levelFilter,
-          store.groupIdFilter,
-          store.clientIdFilter,
-          store.userIdFilter
-        )
-      );
-
-      if (itemsToRender.length > 0 && term) {
-        isWritingToTerminal.value = true;
-        const currentTerm = term; // 保存引用，避免类型检查问题
-        itemsToRender.forEach((item) => currentTerm.writeln(item.formattedMsg));
-
-        if (autoScroll.value) {
-          currentTerm.scrollToBottom();
-          isTerminalAtBottom.value = true;
-        }
-        setTimeout(() => {
-          isWritingToTerminal.value = false;
-        }, 0);
-      }
-    }
-  }
-
-  // 【关键修复】只有在 isPolling 为 true 时才设置 pollingTimeout
-  // 如果 isPolling 为 false，说明轮询已被停止，不应该继续
-  if (isPolling.value) {
-    pollingTimeout = window.setTimeout(
-      runCycle,
-      nextDelay
-    ) as unknown as number;
-    console.log("runCycle: 设置 pollingTimeout", {
-      nextDelay,
-      isPolling: isPolling.value,
-      pollingTimeout: pollingTimeout !== null,
-    });
-  } else {
-    console.log("runCycle: isPolling 为 false，不设置 pollingTimeout");
-  }
-};
-
-const startPolling = () => {
-  if (pollingTimeout) {
-    console.log("轮询已在运行，跳过启动");
-    return;
-  }
-
-  // 【修复】检查是否应该启动轮询
-  // 如果缓存溢出且在历史模式，不应该启动轮询
-  if (isCacheOverflowingInHistoryMode.value) {
-    console.warn("无法启动轮询：缓存溢出且在历史模式", {
-      totalCount: store.totalCount,
-      maxCacheSize: MAX_CACHE_SIZE,
-      isLiveMode: isLiveMode.value,
-    });
-    return;
-  }
-
-  // 【修复】如果超过最大重试次数，需要用户手动重试
-  if (store.isPermanentError) {
-    console.warn("无法启动轮询：超过最大重试次数");
-    return;
-  }
-
-  console.log("启动轮询", {
-    isLiveMode: isLiveMode.value,
-    totalCount: store.totalCount,
-    filteredCount: store.filteredCount,
-    viewportStart: viewportStart.value,
-    maxSliderValue: maxSliderValue.value,
-    isPolling: isPolling.value,
-  });
-
-  // 【修复】先调用 returnToLiveMode，再设置 isPolling，避免状态不一致
-  // 1. 跳转到最新视图 (设置 autoScroll=true, viewportStart=max, 触发 renderWindow)
-  returnToLiveMode();
-
-  // 【修复】在 nextTick 中设置 isPolling，确保 returnToLiveMode 中的检查能正确执行
-  nextTick(() => {
-    // 【修复】再次检查是否应该启动轮询（状态可能在 nextTick 期间发生变化）
-    if (pollingTimeout) {
-      console.log("轮询已在运行，跳过启动");
-      return;
-    }
-
-    if (isCacheOverflowingInHistoryMode.value) {
-      console.warn("nextTick 检查：缓存溢出且在历史模式，不启动轮询");
-      return;
-    }
-
-    if (store.isPermanentError) {
-      console.warn("nextTick 检查：超过最大重试次数，不启动轮询");
-      return;
-    }
-
-    if (!isLiveMode.value) {
-      console.warn("nextTick 检查：不在实时模式，不启动轮询", {
+      console.warn("returnToLiveMode: isLiveMode 未正确更新，强制设置", {
         viewportStart: viewportStart.value,
         maxSliderValue: maxSliderValue.value,
         isLiveMode: isLiveMode.value,
       });
-      return;
-    }
-
-    // 现在可以安全地设置 isPolling 为 true
-    isPolling.value = true;
-    store.resetRetryState();
-
-    // 2. 【关键修复】引入 50ms 延迟，确保 Xterm 终端内容完成绘制，避免时序冲突。
-    setTimeout(() => {
-      // 【修复】再次检查是否应该继续轮询（状态可能在延迟期间发生变化）
-      if (!isPolling.value) {
-        console.log("轮询已被停止，不再继续");
-        return; // 如果轮询已被停止，不再继续
-      }
-
-      // 【修复】确保处于实时模式，否则不应该启动轮询
+      viewportStart.value = Math.max(0, maxSliderValue.value);
       if (!isLiveMode.value) {
-        console.warn("延迟检查：不在实时模式，停止轮询", {
+        console.error("returnToLiveMode: isLiveMode 仍然未正确更新", {
           viewportStart: viewportStart.value,
           maxSliderValue: maxSliderValue.value,
           isLiveMode: isLiveMode.value,
         });
-        stopPolling(true);
-        return;
       }
+    }
 
-      // 【修复】再次检查缓存溢出（可能在延迟期间发生了变化）
-      if (isCacheOverflowingInHistoryMode.value) {
-        console.warn("延迟检查：缓存溢出且在历史模式，停止轮询");
-        stopPolling(true);
-        return;
-      }
+    autoScroll.value = true;
+    isTerminalAtBottom.value = true;
+    renderWindow();
 
-      // 强制锁定并滚动到底部，保证锁定状态的持久性。
-      scrollToBottom();
-
-      // 3. 在滚动完成后，再启动轮询周期。
-      // 【关键修复】确保 runCycle 被调用，如果 runCycle 提前返回，需要重置 isPolling
-      runCycle().catch((err) => {
-        console.error("runCycle 执行出错", err);
-        stopPolling(true);
-      });
-
-      // 【关键修复】检查 runCycle 是否立即返回（没有设置 pollingTimeout）
-      // 如果 runCycle 立即返回且没有设置 pollingTimeout，说明轮询没有真正启动
-      setTimeout(() => {
-        if (isPolling.value && !pollingTimeout) {
-          console.warn("runCycle 执行后未设置 pollingTimeout，重置 isPolling");
-          isPolling.value = false;
-        }
-      }, 100); // 给 runCycle 一些时间执行
-    }, 50); // 50ms 延迟
+    // 【修复】移除 returnToLiveMode 中的自动启动轮询逻辑
+    // 轮询启动应该由 watch(isLiveMode) 统一管理，避免重复触发
+    // 只在明确需要启动轮询的场景（如点击"回到最新"按钮）才在这里启动
+  };
+  
+  // === 交互处理 ===
+  const handleUserFilterToggle = () => {
+    if (isUserFiltered.value) {
+      store.setUserIdFilter(null);
+    } else {
+      store.setUserIdFilter(CURRENT_USER);
+    }
+  };
+  
+  const handleFilterModeChange = () => {
+    store.setFilterMode(currentFilterMode.value);
+    returnToLiveMode();
+  };
+  
+  const handleLevelFilterChange = () => {
+    store.setLevelFilter(levelFilter.value);
+    returnToLiveMode();
+  };
+  
+  const handleGroupFilterChange = () => {
+    if (debounceTimeout) clearTimeout(debounceTimeout);
+    debounceTimeout = window.setTimeout(() => {
+      store.setGroupIdFilter(groupIdFilter.value || null);
+      returnToLiveMode();
+    }, 300) as unknown as number;
+  };
+  
+  const handleClientFilterChange = () => {
+    if (debounceTimeout) clearTimeout(debounceTimeout);
+    debounceTimeout = window.setTimeout(() => {
+      store.setClientIdFilter(clientIdFilter.value || null);
+      returnToLiveMode();
+    }, 300) as unknown as number;
+  };
+  
+  // 【修复】确保组件和 store 之间的双向同步
+  watch(currentFilterMode, (mode) => {
+    store.setFilterMode(mode);
+    returnToLiveMode();
   });
-};
+  watch(
+    () => store.filterMode,
+    (mode) => {
+      if (currentFilterMode.value !== mode) {
+        currentFilterMode.value = mode;
+      }
+    }
+  );
+  
+  watch(levelFilter, (val) => {
+    store.setLevelFilter(val);
+    returnToLiveMode();
+  });
+  watch(
+    () => store.levelFilter,
+    (val) => {
+      if (levelFilter.value !== val) {
+        levelFilter.value = val;
+      }
+    }
+  );
+  
+  watch(
+    () => store.groupIdFilter,
+    (val) => {
+      const newVal = val || "";
+      if (groupIdFilter.value !== newVal) {
+        groupIdFilter.value = newVal;
+      }
+    }
+  );
+  watch(
+    () => store.clientIdFilter,
+    (val) => {
+      const newVal = val || "";
+      if (clientIdFilter.value !== newVal) {
+        clientIdFilter.value = newVal;
+      }
+    }
+  );
+  
+  watch(
+    () => store.userIdFilter,
+    () => {
+      returnToLiveMode();
+    }
+  );
+  
+  const loadMoreHistory = async () => {
+    if (!store.hasMoreHistory || store.isFetchingHistory || !term) return 0;
+  
+    const oldLogs = store.filteredLogs;
+    const currentAnchorId =
+      oldLogs.length > 0 && viewportStart.value < oldLogs.length
+        ? oldLogs[viewportStart.value].id
+        : null;
+  
+    const oldLogsToRender = store.getLogSlice(viewportStart.value, TERMINAL_SIZE);
+    const oldFirstLogId =
+      oldLogsToRender.length > 0 ? oldLogsToRender[0].id : null;
+  
+    const buffer = term.buffer.active;
+    const currentViewportY = buffer.viewportY;
+    const currentBaseY = buffer.baseY;
+    const scrollOffsetFromTop = currentBaseY - currentViewportY;
+    const currentBufferLength = buffer.length;
+  
+    const logsAddedCount = await store.fetchOlderLogs();
+  
+    if (logsAddedCount === -1) {
+      if (isPolling.value) {
+        stopPolling(true);
+      }
+      return 0;
+    }
+  
+    if (logsAddedCount > 0) {
+      const newLogs = store.filteredLogs;
+  
+      if (currentAnchorId) {
+        const newAnchorIndex = newLogs.findIndex(
+          (log) => log.id === currentAnchorId
+        );
+        if (newAnchorIndex !== -1) {
+          viewportStart.value = newAnchorIndex;
+        } else {
+          viewportStart.value = Math.min(logsAddedCount, maxSliderValue.value);
+        }
+      } else {
+        viewportStart.value = 0;
+      }
+  
+      clampViewportStart();
+  
+      const newLogsToRender = store.getLogSlice(
+        viewportStart.value,
+        TERMINAL_SIZE
+      );
+  
+      let actualNewLogs: typeof newLogsToRender = [];
+      if (oldFirstLogId && newLogsToRender.length > 0) {
+        const oldFirstLogIndex = newLogsToRender.findIndex(
+          (log) => log.id === oldFirstLogId
+        );
+        if (oldFirstLogIndex > 0) {
+          actualNewLogs = newLogsToRender.slice(0, oldFirstLogIndex);
+        } else if (oldFirstLogIndex === -1) {
+          renderWindow();
+          return logsAddedCount;
+        }
+      } else if (newLogsToRender.length > 0 && oldLogsToRender.length === 0) {
+        actualNewLogs = newLogsToRender;
+      }
+  
+      if (!isLiveMode.value && term && actualNewLogs.length > 0) {
+        const t = term;
+        const newLinesCount = actualNewLogs.length;
+  
+        const maxScrollback = TERMINAL_SIZE;
+        const willExceedScrollback =
+          currentBufferLength + newLinesCount > maxScrollback;
+  
+        if (willExceedScrollback) {
+          console.warn(
+            `增量更新会导致超出 scrollback 限制 (${
+              currentBufferLength + newLinesCount
+            } > ${maxScrollback})，使用完全重新渲染`
+          );
+          renderWindow();
+          return logsAddedCount;
+        }
+  
+        t.scrollLines(newLinesCount);
+        t.write("\x1b[s");
+        t.write("\x1b[H");
+  
+        actualNewLogs.forEach((item, index) => {
+          if (index > 0) {
+            t.write("\r\n");
+          }
+          t.write("\x1b[2K");
+          t.write("\r");
+          t.write(item.formattedMessage);
+        });
+  
+        t.write("\x1b[u");
+  
+        isTerminalAtBottom.value = false;
+        autoScroll.value = false;
+      } else {
+        renderWindow();
+  
+        setTimeout(() => {
+          if (!term || isLiveMode.value) return;
+  
+          const newBuffer = term.buffer.active;
+          const newBaseY = newBuffer.baseY;
+  
+          const targetViewportY = Math.max(0, newBaseY - scrollOffsetFromTop);
+          const currentViewportY = newBuffer.viewportY;
+          const scrollLines = targetViewportY - currentViewportY;
+  
+          if (scrollLines !== 0) {
+            term.scrollLines(scrollLines);
+            isTerminalAtBottom.value = false;
+            autoScroll.value = false;
+          }
+        }, 0);
+      }
+    }
+  
+    return logsAddedCount;
+  };
+  
+  const handleSliderInteraction = () => {
+    autoScroll.value = false;
+    clampViewportStart();
+  };
+  
+  const handleSliderChange = () => {
+    renderWindow();
+    // 【修复】如果滑到最右边（实时模式），且未在轮询，启动轮询
+    // 但需要检查是否已经在启动流程中，避免重复触发
+    if (isLiveMode.value && !isPolling.value && !isStartingPolling.value && !store.isPermanentError && !isCacheOverflowingInHistoryMode.value) {
+      // 延迟检查，避免与 watch(isLiveMode) 重复触发
+      setTimeout(() => {
+        if (isLiveMode.value && !isPolling.value && !isStartingPolling.value && !pollingTimeout) {
+          startPolling();
+        }
+      }, 100);
+    }
+  };
+  
+  const clearView = () => {
+    store.clearAllLogs();
+    term?.clear();
+  };
+  
+  watch(autoScroll, (newValue) => {
+    if (newValue && isLiveMode.value) {
+      term?.scrollToBottom();
+      isTerminalAtBottom.value = true;
+    }
+  });
+  
+  const runCycle = async () => {
+    if (isCacheOverflowingInHistoryMode.value) {
+      if (isPolling.value) {
+        console.log("停止轮询：缓存溢出且在历史模式", {
+          totalCount: store.totalCount,
+          maxCacheSize: MAX_CACHE_SIZE,
+          isLiveMode: isLiveMode.value,
+          viewportStart: viewportStart.value,
+          maxSliderValue: maxSliderValue.value,
+        });
+        stopPolling(true);
+      }
+      return;
+    }
+  
+    if (store.isPermanentError) {
+      if (isPolling.value) {
+        console.log("停止轮询：超过最大重试次数");
+        stopPolling(true);
+      }
+      return;
+    }
+  
+    if (!isPolling.value) {
+      console.log("runCycle: isPolling 为 false，停止执行");
+      return;
+    }
+  
+    const wasInLiveMode = isLiveMode.value;
+    const { newLogs, nextDelay } = await store.pullAndProcessLogs();
+  
+    if (nextDelay === 0) {
+      if (isPolling.value) {
+        stopPolling(true);
+      }
+      return;
+    }
+  
+    if (wasInLiveMode) {
+      if (!isLiveMode.value) {
+        if (isPolling.value) {
+          pollingTimeout = window.setTimeout(
+            runCycle,
+            nextDelay
+          ) as unknown as number;
+        }
+        return;
+      }
+  
+      viewportStart.value = maxSliderValue.value;
+      if (!store.isPollingError && newLogs.length > 0) {
+        const itemsToRender = newLogs.filter((item) =>
+          isLogVisible(
+            item,
+            store.filterMode,
+            {
+              levelFilter: store.levelFilter || undefined,
+              groupIdFilter: store.groupIdFilter || undefined,
+              clientIdFilter: store.clientIdFilter || undefined,
+              userIdFilter: store.userIdFilter || undefined,
+            }
+          )
+        );
+  
+        if (itemsToRender.length > 0 && term) {
+          isWritingToTerminal.value = true;
+          const currentTerm = term;
+          itemsToRender.forEach((item) => currentTerm.writeln(item.formattedMessage));
+  
+          if (autoScroll.value) {
+            currentTerm.scrollToBottom();
+            isTerminalAtBottom.value = true;
+          }
+          setTimeout(() => {
+            isWritingToTerminal.value = false;
+          }, 0);
+        }
+      }
+    }
+  
+    if (isPolling.value) {
+      pollingTimeout = window.setTimeout(
+        runCycle,
+        nextDelay
+      ) as unknown as number;
+      console.log("runCycle: 设置 pollingTimeout", {
+        nextDelay,
+        isPolling: isPolling.value,
+        pollingTimeout: pollingTimeout !== null,
+      });
+    } else {
+      console.log("runCycle: isPolling 为 false，不设置 pollingTimeout");
+    }
+  };
+  
+  const startPolling = () => {
+    // 【修复】防止重复触发：如果已经在启动流程中或已经在轮询，跳过
+    if (pollingTimeout || isStartingPolling.value) {
+      console.log("轮询已在运行或正在启动，跳过启动", {
+        pollingTimeout: pollingTimeout !== null,
+        isStartingPolling: isStartingPolling.value,
+      });
+      return;
+    }
 
-const stopPolling = (isAutomaticPause: boolean = false) => {
-  if (pollingTimeout) clearTimeout(pollingTimeout);
-  pollingTimeout = null;
-  isPolling.value = false;
-  if (!isAutomaticPause) store.resetRetryState();
-};
+    if (isCacheOverflowingInHistoryMode.value) {
+      console.warn("无法启动轮询：缓存溢出且在历史模式", {
+        totalCount: store.totalCount,
+        maxCacheSize: MAX_CACHE_SIZE,
+        isLiveMode: isLiveMode.value,
+      });
+      return;
+    }
 
-const onResize = () => {
-  fitAddon?.fit();
-  renderWindow();
-};
+    if (store.isPermanentError) {
+      console.warn("无法启动轮询：超过最大重试次数");
+      return;
+    }
 
-watch(
-  () => store.isPollingError,
-  (isError) => {
-    // 【修复】只有在超过最大重试次数时才停止轮询，否则继续重试
-    if (isError && store.isPermanentError && isPolling.value) {
+    // 【修复】设置启动标记，防止重复触发
+    isStartingPolling.value = true;
+
+    console.log("启动轮询", {
+      isLiveMode: isLiveMode.value,
+      totalCount: store.totalCount,
+      filteredCount: store.filteredCount,
+      viewportStart: viewportStart.value,
+      maxSliderValue: maxSliderValue.value,
+      isPolling: isPolling.value,
+    });
+
+    returnToLiveMode();
+
+    nextTick(() => {
+      // 【修复】再次检查，确保在 nextTick 期间没有其他调用启动轮询
+      // 注意：只检查 pollingTimeout，不检查 isPolling，因为 isPolling 可能还未设置
+      if (pollingTimeout) {
+        console.log("轮询已在运行（pollingTimeout 已设置），跳过启动");
+        isStartingPolling.value = false;
+        return;
+      }
+
+      if (isCacheOverflowingInHistoryMode.value) {
+        console.warn("nextTick 检查：缓存溢出且在历史模式，不启动轮询");
+        isStartingPolling.value = false;
+        return;
+      }
+
+      if (store.isPermanentError) {
+        console.warn("nextTick 检查：超过最大重试次数，不启动轮询");
+        isStartingPolling.value = false;
+        return;
+      }
+
+      // 【修复】在初始状态下（filteredCount 为 0 或很少），即使不在实时模式也应该启动轮询
+      // 因为此时用户应该处于最新状态，只是数据还没有加载
+      const shouldStartPolling = isLiveMode.value || store.filteredCount === 0;
+      
+      if (!shouldStartPolling) {
+        console.warn("nextTick 检查：不在实时模式且已有数据，不启动轮询", {
+          viewportStart: viewportStart.value,
+          maxSliderValue: maxSliderValue.value,
+          isLiveMode: isLiveMode.value,
+          filteredCount: store.filteredCount,
+        });
+        isStartingPolling.value = false;
+        return;
+      }
+
+      isPolling.value = true;
+      store.resetRetryState();
+
+      setTimeout(() => {
+        // 【修复】清除启动标记
+        isStartingPolling.value = false;
+
+        if (!isPolling.value) {
+          console.log("轮询已被停止，不再继续");
+          return;
+        }
+
+        if (!isLiveMode.value) {
+          console.warn("延迟检查：不在实时模式，停止轮询", {
+            viewportStart: viewportStart.value,
+            maxSliderValue: maxSliderValue.value,
+            isLiveMode: isLiveMode.value,
+          });
+          stopPolling(true);
+          return;
+        }
+
+        if (isCacheOverflowingInHistoryMode.value) {
+          console.warn("延迟检查：缓存溢出且在历史模式，停止轮询");
+          stopPolling(true);
+          return;
+        }
+
+        scrollToBottom();
+
+        runCycle().catch((err) => {
+          console.error("runCycle 执行出错", err);
+          stopPolling(true);
+        });
+
+        setTimeout(() => {
+          if (isPolling.value && !pollingTimeout) {
+            console.warn("runCycle 执行后未设置 pollingTimeout，重置 isPolling");
+    isPolling.value = false;
+          }
+        }, 100);
+      }, 50);
+    });
+  };
+  
+  const stopPolling = (isAutomaticPause: boolean = false) => {
+    if (pollingTimeout) clearTimeout(pollingTimeout);
+    pollingTimeout = null;
+    isPolling.value = false;
+    isStartingPolling.value = false; // 【修复】清除启动标记
+    if (!isAutomaticPause) store.resetRetryState();
+  };
+  
+  const onResize = () => {
+    fitAddon?.fit();
+    renderWindow();
+  };
+  
+  watch(
+    () => store.isPollingError,
+    (isError) => {
+      if (isError && store.isPermanentError && isPolling.value) {
+        stopPolling(true);
+      }
+    }
+  );
+  
+  watch(isLiveMode, (isLive) => {
+    // 【修复】防止重复触发：如果已经在启动流程中，跳过
+    if (isLive && !isPolling.value && !isStartingPolling.value && !store.isPermanentError) {
+      if (!isCacheOverflowingInHistoryMode.value && !pollingTimeout) {
+        // 【修复】添加防抖，避免快速切换时重复触发
+        setTimeout(() => {
+          // 再次检查状态，确保在延迟期间状态没有变化
+          if (isLiveMode.value && !isPolling.value && !isStartingPolling.value && !pollingTimeout && !store.isPermanentError && !isCacheOverflowingInHistoryMode.value) {
+            startPolling();
+          }
+        }, 50);
+      }
+    } else if (!isLive && isPolling.value) {
       stopPolling(true);
     }
-  }
-);
-
-watch(isLiveMode, (isLive) => {
-  // 【修复】当用户处于最新窗口时（不管是通过滑块、跳转等方式），自动启动轮询
-  if (isLive && !isPolling.value && !store.isPermanentError) {
-    // 【修复】检查是否应该启动轮询（避免在缓存溢出时启动）
-    if (!isCacheOverflowingInHistoryMode.value) {
-      startPolling();
-    }
-  } else if (!isLive && isPolling.value) {
-    // 如果离开最新窗口，停止轮询
-    stopPolling(true);
-  }
-});
-
-// 【修复】监听 filteredCount 变化，当缓存被截断时自动调整 viewportStart
-watch(
-  () => store.filteredCount,
-  (newCount, oldCount) => {
-    // 如果 filteredCount 减少（可能是缓存被截断了），需要调整 viewportStart
-    if (oldCount !== undefined && newCount < oldCount) {
-      const removedCount = oldCount - newCount;
-
-      // 如果当前不在 Live Mode，需要调整 viewportStart
-      if (!isLiveMode.value) {
-        // viewportStart 应该减少相同的数量，但不能小于 0
-        viewportStart.value = Math.max(0, viewportStart.value - removedCount);
-      } else {
-        // Live Mode 下，直接调整到最新的位置
-        viewportStart.value = maxSliderValue.value;
+  });
+  
+  watch(
+    () => store.filteredCount,
+    (newCount, oldCount) => {
+      if (oldCount !== undefined && newCount < oldCount) {
+        const removedCount = oldCount - newCount;
+  
+        if (!isLiveMode.value) {
+          viewportStart.value = Math.max(0, viewportStart.value - removedCount);
+        } else {
+          viewportStart.value = maxSliderValue.value;
+        }
+  
+        clampViewportStart();
+        if (viewportStart.value !== maxSliderValue.value || !isLiveMode.value) {
+          renderWindow();
+        }
       }
-
-      clampViewportStart();
-      // 如果 viewportStart 发生了变化，需要重新渲染
-      if (viewportStart.value !== maxSliderValue.value || !isLiveMode.value) {
+    }
+  );
+  
+  watch(maxSliderValue, (newMax) => {
+    if (viewportStart.value > newMax) {
+      viewportStart.value = newMax;
+      if (!isLiveMode.value) {
         renderWindow();
       }
     }
-  }
-);
+  });
+  
+  onMounted(() => {
+    currentFilterMode.value = store.filterMode;
+    levelFilter.value = store.levelFilter;
+    groupIdFilter.value = store.groupIdFilter || "";
+    clientIdFilter.value = store.clientIdFilter || "";
 
-// 【修复】监听 maxSliderValue 变化，确保 viewportStart 不超过最大值
-watch(maxSliderValue, (newMax) => {
-  if (viewportStart.value > newMax) {
-    viewportStart.value = newMax;
-    if (!isLiveMode.value) {
-      renderWindow();
+    initTerminal();
+    
+    // 【修复】在 nextTick 中启动轮询，确保终端和状态都已初始化
+    nextTick(() => {
+      console.log("onMounted: 准备启动轮询", {
+        filteredCount: store.filteredCount,
+        maxSliderValue: maxSliderValue.value,
+        isLiveMode: isLiveMode.value,
+        isPolling: isPolling.value,
+        isStartingPolling: isStartingPolling.value,
+        pollingTimeout: pollingTimeout !== null,
+      });
+    startPolling();
+    });
+    
+    window.addEventListener("resize", onResize);
+
+    if (terminalRef.value) {
+      terminalRef.value.addEventListener("wheel", wheelListener, {
+        passive: true,
+      });
+    }
+  });
+  
+  onUnmounted(() => {
+    if (pollingTimeout) clearTimeout(pollingTimeout);
+    window.removeEventListener("resize", onResize);
+  
+    if (terminalRef.value) {
+      terminalRef.value.removeEventListener("wheel", wheelListener);
+    }
+  
+    if (viewportElement) {
+      viewportElement.removeEventListener("scroll", horizontalScrollListener);
+      viewportElement.removeEventListener("scroll", domScrollListener);
+    }
+    term?.dispose();
+  });
+  </script>
+  
+  <style scoped>
+  /* ---------------- 基础样式 - 采用柔和的浅色调 ---------------- */
+  .terminal-wrapper {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 600px;
+    background-color: #f7f7f7;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #eaeaea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+      Arial, sans-serif;
+  }
+  
+  .control-bar {
+    border-radius: 0;
+    border: none;
+    border-bottom: 1px solid #eaeaea;
+  }
+  
+  .filter-row {
+    user-select: none;
+    color: #383a42;
+    font-size: 13px;
+  }
+  
+  .input-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  
+  .label {
+    font-weight: 600;
+  }
+  
+  .mode-select {
+    font-weight: bold;
+  }
+  
+  .filter-checkbox {
+    color: #007acc;
+    font-weight: 500;
+  }
+  
+  .header {
+    border-radius: 0;
+    border: none;
+    border-bottom: 1px solid #eaeaea;
+    font-size: 12px;
+    color: #383a42;
+  }
+  
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #999;
+    transition: all 0.3s;
+  }
+  
+  .status-dot.live {
+    background-color: #50a14f;
+    box-shadow: 0 0 6px rgba(80, 161, 79, 0.4);
+  }
+  
+  .status-dot.history {
+    background-color: #9d7a00;
+  }
+  
+  .status-dot.error {
+    background-color: #e4564a;
+    animation: pulse 1s infinite;
+  }
+  
+  .status-dot.paused {
+    background-color: #aaaaaa;
+  }
+  
+  @keyframes pulse {
+    0% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
+    100% {
+      opacity: 1;
     }
   }
-});
-
-onMounted(() => {
-  // 【修复】初始化过滤状态，确保组件和 store 同步
-  currentFilterMode.value = store.filterMode;
-  levelFilter.value = store.levelFilter;
-  groupIdFilter.value = store.groupIdFilter || "";
-  clientIdFilter.value = store.clientIdFilter || "";
-
-  initTerminal();
-  startPolling();
-  window.addEventListener("resize", onResize);
-
-  // 注册 wheelListener
-  if (terminalRef.value) {
-    terminalRef.value.addEventListener("wheel", wheelListener, {
-      passive: true,
-    });
+  
+  .title {
+    font-weight: 600;
   }
-});
-
-onUnmounted(() => {
-  if (pollingTimeout) clearTimeout(pollingTimeout);
-  window.removeEventListener("resize", onResize);
-
-  // 移除 wheelListener
-  if (terminalRef.value) {
-    terminalRef.value.removeEventListener("wheel", wheelListener);
+  
+  .meta-info {
+    color: #666;
   }
-
-  // 移除 DOM 监听器
-  if (viewportElement) {
-    viewportElement.removeEventListener("scroll", horizontalScrollListener);
-    viewportElement.removeEventListener("scroll", domScrollListener);
+  
+  .log-gap-warning {
+    color: #e4564a;
+    margin-left: 8px;
+    font-weight: 500;
   }
-  term?.dispose();
-});
-</script>
-
-<style scoped>
-/* ---------------- 基础样式 - 采用柔和的浅色调 ---------------- */
-.terminal-wrapper {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 600px;
-  background-color: #f7f7f7; /* 略微深于终端背景 */
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid #eaeaea;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
-}
-.control-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 15px;
-  background-color: #ffffff; /* 纯白背景 */
-  border-bottom: 1px solid #eaeaea;
-  user-select: none;
-  color: #383a42; /* 柔和深色文本 */
-  font-size: 13px;
-}
-
-.filter-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-
-.action-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-top: 1px solid #eaeaea; /* 柔和分割线 */
-  padding-top: 8px;
-}
-
-.right-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.input-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.label {
-  font-weight: 600;
-}
-
-.mode-select,
-.common-select,
-.common-input {
-  padding: 4px 8px;
-  border: 1px solid #d0d0d0;
-  border-radius: 5px;
-  background-color: #ffffff;
-  color: #383a42;
-  font-size: 12px;
-  transition: border-color 0.2s;
-}
-.mode-select:focus,
-.common-select:focus,
-.common-input:focus {
-  border-color: #007acc;
-  box-shadow: 0 0 0 1px #007acc;
-}
-
-.mode-select {
-  font-weight: bold;
-  color: #007acc;
-}
-.common-input {
-  width: 90px;
-}
-.common-input:disabled,
-.common-select:disabled {
-  background-color: #eeeeee;
-  color: #999;
-  cursor: not-allowed;
-  border-color: #eaeaea;
-}
-
-.checkbox-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-}
-.filter-checkbox {
-  color: #007acc;
-  font-weight: 500;
-}
-.filter-checkbox.disabled {
-  color: #aaaaaa;
-  cursor: not-allowed;
-}
-
-button {
-  cursor: pointer;
-  border: none;
-  outline: none;
-}
-.btn-icon {
-  background: transparent;
-  font-size: 16px;
-  padding: 4px;
-  border-radius: 4px;
-  color: #555;
-}
-.btn-icon:hover {
-  background-color: #eaeaea;
-}
-
-.btn-action {
-  font-size: 12px;
-  padding: 6px 14px;
-  border-radius: 5px;
-  color: white;
-  font-weight: 500;
-}
-.btn-action.start {
-  background-color: #50a14f;
-} /* 终端 Green */
-.btn-action.start:hover {
-  background-color: #438e42;
-}
-.btn-action.permanent-error {
-  background-color: #e4564a;
-} /* 终端 Red */
-.btn-action.permanent-error:hover {
-  background-color: #c94c42;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  padding: 6px 15px;
-  background-color: #ffffff;
-  border-bottom: 1px solid #eaeaea;
-  font-size: 12px;
-  gap: 10px;
-  color: #383a42;
-}
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background-color: #999;
-  transition: all 0.3s;
-}
-.status-dot.live {
-  background-color: #50a14f;
-  box-shadow: 0 0 6px rgba(80, 161, 79, 0.4);
-} /* 终端 Green */
-.status-dot.history {
-  background-color: #9d7a00;
-} /* 终端 Yellow */
-.status-dot.error {
-  background-color: #e4564a;
-  animation: pulse 1s infinite;
-} /* 终端 Red */
-.status-dot.paused {
-  background-color: #aaaaaa;
-} /* 终端 Bright Black */
-
-@keyframes pulse {
-  0% {
-    opacity: 1;
+  
+  .resume-hint {
+    color: #666;
+    font-style: italic;
+    font-size: 11px;
   }
-  50% {
-    opacity: 0.5;
+  
+  .timeline-bar {
+    border-radius: 0;
+    border: none;
+    border-bottom: 1px solid #eaeaea;
+    background: #eeeeee;
+    font-size: 12px;
+    color: #666;
   }
-  100% {
-    opacity: 1;
+  
+  .time-label {
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
   }
-}
-
-.title {
-  font-weight: 600;
-}
-.meta-info {
-  color: #666;
-  margin-left: auto;
-}
-.log-gap-warning {
-  color: #e4564a;
-  margin-left: 8px;
-  font-weight: 500;
-}
-.resume-hint {
-  color: #666;
-  font-style: italic;
-  font-size: 11px;
-}
-
-.timeline-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 15px;
-  background: #eeeeee;
-  border-bottom: 1px solid #eaeaea;
-  font-size: 12px;
-  color: #666;
-}
-.history-slider {
-  flex: 1;
-  cursor: pointer;
-  height: 4px;
-}
-.slider-placeholder {
-  flex: 1;
-  height: 4px;
-  border-radius: 2px;
-  background-color: #ddd;
-}
-.btn-load-history {
-  background-color: #007acc; /* 强调蓝 */
-  color: white;
-  padding: 2px 8px;
-  border-radius: 3px;
-  font-size: 11px;
-  transition: background-color 0.2s;
-}
-.btn-load-history:hover {
-  background-color: #0069b3;
-}
-
-.term-box {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  padding-left: 8px;
-  background-color: #fafafa;
-} /* 终端背景 */
-.xterm-container {
-  width: 100%;
-  height: 100%;
-}
-
-/* ---------------- ✨ 漂亮的滚动条样式 ✨ (不变) ---------------- */
-
-/* 1. Webkit/Blink 样式 (Chrome, Safari, Edge) */
-.xterm-container ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.xterm-container ::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.xterm-container ::-webkit-scrollbar-thumb {
-  background-color: #b0b0b0;
-  border-radius: 4px;
-  border: 2px solid transparent;
-}
-
-.xterm-container ::-webkit-scrollbar-thumb:hover {
-  background-color: #888888;
-}
-
-/* 2. Firefox 样式 */
-.xterm-container {
-  scrollbar-width: thin;
-  scrollbar-color: #b0b0b0 transparent;
-}
-
-/* ---------------- 列头同步样式 (保持不变) ---------------- */
-
-.column-header-wrapper {
-  position: relative;
-  z-index: 5;
-  background-color: #f7f7f7; /* 匹配 wrapper 背景 */
-  transition: transform 0.05s linear;
-  border-top: 1px solid #eaeaea;
-}
-
+  
+  .slider-placeholder {
+    height: 4px;
+    border-radius: 2px;
+    background-color: #ddd;
+  }
+  
+  .no-more-history {
+    color: #999;
+  }
+  
+  .column-header-wrapper {
+    position: relative;
+    z-index: 5;
+    background-color: #f7f7f7;
+    transition: transform 0.05s linear;
+    border-top: 1px solid #eaeaea;
+  }
+  
 .column-header {
   display: flex;
   font-family: monospace;
@@ -1517,5 +1327,5 @@ button {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
-}
-</style>
+  }
+  </style>

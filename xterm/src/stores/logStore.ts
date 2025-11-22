@@ -1,155 +1,128 @@
-import { defineStore } from "pinia";
-import { ref, computed, type Ref } from "vue";
+import { defineStore } from 'pinia'
+import { ref, computed, type Ref } from 'vue'
+import { FilterMode, LogLevel, LogDataPacket } from './type'
 
-// === 1. 类型和常量定义 ===
+// ==== 以下为常量导出，保持向后兼容 ====
+import {
+  POLL_INTERVAL_BASE,
+  MAX_RETRY_COUNT,
+  MAX_RETRY_DELAY,
+  RETRY_JITTER_RATIO,
+  SENTINEL_POLL_INTERVAL,
+  SENTINEL_QUERY_LIMIT,
+  SENTINEL_TIME_WINDOW,
+  SENTINEL_COOLDOWN_INTERVAL,
+  SENTINEL_TIME_STEP,
+  POLLING_LIMIT,
+  HISTORY_LIMIT,
+  HISTORY_TIME_STEP,
+  MAX_MOCK_HISTORY_SIZE,
+  MOCK_USERS,
+  MOCK_SERVICES,
+  MOCK_GROUPS,
+  MOCK_CLIENTS,
+} from '../components/config'
 
-export type LogLevel = "ERROR" | "WARN" | "INFO" | "DEBUG";
-export type FilterMode =
-  | "ALL"
-  | "NONE"
-  | "LEVEL"
-  | "GROUP_ID"
-  | "CLIENT_ID"
-  | "USER_ID";
+// 重新导出常量，保持向后兼容
+export { POLL_INTERVAL_BASE, MAX_RETRY_COUNT }
+// ====== 以上为常量导出，保持向后兼容 ======
 
-export interface LogItem {
-  id: number;
-  timestamp: number; // Unix timestamp in ms
-  sequence: number; // 用于时间戳相同时的排序
-  level: LogLevel;
-  serviceName: string;
-  userId: string | null;
-  groupId: string;
-  clientId: string;
-  message: string;
-  formattedMsg: string; // 包含 ANSI 颜色的格式化消息
+
+
+// constants
+export const MAX_CACHE_SIZE = 10000; // 最大缓存日志数量
+
+// insertion & sorting
+export type LogComparator = (a: LogDataPacket, b: LogDataPacket) => number
+
+export const logComparator: LogComparator = (a, b) => {
+  if (a.timestamp !== b.timestamp) {
+    return a.timestamp - b.timestamp
+  }
+
+  return a.sequence - b.sequence
 }
 
-export const MAX_CACHE_SIZE = 10000;
-export const POLL_INTERVAL_BASE = 2000; // 基础轮询间隔 2s
-export const MAX_RETRY_COUNT = 5; // 最大重试次数，超过后停止轮询
-const MAX_RETRY_DELAY = 60000; // 最大重试延迟 60s
-const RETRY_JITTER_RATIO = 0.1; // 随机抖动比例 10%
-const SENTINEL_POLL_INTERVAL = 3; // 哨兵轮询间隔：每 3 次主轮询执行一次哨兵轮询
-const SENTINEL_QUERY_LIMIT = 200; // 哨兵每次查询的日志数量限制
-const SENTINEL_TIME_WINDOW = 3600000; // 哨兵检查的时间窗口：1小时（3600000ms），只检查最近1小时内的延迟日志
-const SENTINEL_COOLDOWN_INTERVAL = 6; // 哨兵冷却间隔：完成一轮检查后，等待 6 次主轮询（约 12 秒）再重新启动
-const SENTINEL_TIME_STEP = 300000; // 哨兵每次查询的时间步长：5分钟（300000ms），每次往前检查5分钟
-
-// 【核心常量】历史和轮询相关的常量
-const POLLING_LIMIT = 100; // 轮询限制
-const HISTORY_LIMIT = 100; // 历史查询限制
-const HISTORY_TIME_STEP = 3600000; // 历史查询的时间步长 (1小时 = 3600000 ms)
-const MAX_MOCK_HISTORY_SIZE = 50000; // 模拟的总历史日志条数
-
-// 模拟的用户和 ID
-const MOCK_USERS = ["admin", "userA", "userB", null];
-const MOCK_SERVICES = ["AuthService", "DataProcessor", "Gateway", "Analytics"];
-const MOCK_GROUPS = ["A100", "B200", "C300"];
-const MOCK_CLIENTS = ["ClientX", "ClientY", "ClientZ"];
-
-// === 2. 通用过滤、比较和查找逻辑抽象 ===
-
-/**
- * LogItem 比较函数：首先按时间戳升序，时间戳相同时按 sequence 升序。
- * 用于保持 allLogs 的严格有序。
- */
-export const logComparator = (a: LogItem, b: LogItem): number => {
-  // 1. 按时间戳升序
-  if (a.timestamp !== b.timestamp) {
-    return a.timestamp - b.timestamp;
-  }
-  // 2. 时间戳相同时，按 sequence 升序
-  return a.sequence - b.sequence;
-};
-
-/**
- * 通过二分查找，找到在有序数组 logs 中，第一个 logItem 满足 logItem >= targetLog 的索引。
- */
-export const findInsertionIndex = (
-  logs: LogItem[],
-  targetLog: LogItem,
-  comparator: (a: LogItem, b: LogItem) => number
-): number => {
-  let low = 0;
-  let high = logs.length;
+export const findInsertionIndex = (log: LogDataPacket, logs: LogDataPacket[], comparator: LogComparator) => {
+  let high = logs.length
+  let low = 0
 
   while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    // 如果 logs[mid] < targetLog，则目标在 mid 之后
-    if (comparator(logs[mid], targetLog) < 0) {
-      low = mid + 1;
-    } else {
-      // 否则目标可能是 mid 或 mid 之前
-      high = mid;
+    const mid = Math.floor((low + high) / 2)
+
+    if (comparator(logs[mid], log) < 0) {
+      low = mid + 1
+    }
+    else {
+      high = mid
     }
   }
-  return low;
-};
 
-/**
- * 根据当前的过滤模式和参数，判断单个 LogItem 是否应该被显示。
- */
-export const shouldLogBeDisplayed = (
-  item: LogItem,
-  mode: FilterMode,
-  levelFilter: string | null,
-  groupIdFilter: string | null,
-  clientIdFilter: string | null,
-  userIdFilter: string | null
-): boolean => {
-  if (mode === "NONE") return true;
+  return low
+}
 
-  let match = true;
+// detect & filter
+export interface FilterOptions {
+  levelFilter?: string
+  userIdFilter?: string
+  groupIdFilter?: string
+  clientIdFilter?: string
+}
 
-  // ALL 模式：必须同时满足所有启用的过滤器（忽略未设置的过滤器）
-  if (mode === "ALL") {
-    // 【修复】只有当过滤器被设置时才进行匹配检查
-    if (userIdFilter !== null && item.userId !== userIdFilter) match = false;
-    if (levelFilter !== null && item.level !== levelFilter) match = false;
-    if (
-      groupIdFilter !== null &&
-      groupIdFilter.length > 0 &&
-      !item.groupId.includes(groupIdFilter)
-    )
-      match = false;
-    if (
-      clientIdFilter !== null &&
-      clientIdFilter.length > 0 &&
-      !item.clientId.includes(clientIdFilter)
-    )
-      match = false;
-  }
-  // 单一模式：仅根据当前模式的过滤器判断（如果过滤器未设置，则显示所有日志）
-  else if (mode === "LEVEL") {
-    // 【修复】如果 levelFilter 为 null，应该显示所有日志（match 保持为 true）
-    if (levelFilter !== null && item.level !== levelFilter) match = false;
-  } else if (mode === "GROUP_ID") {
-    // 【修复】如果 groupIdFilter 为 null 或空，应该显示所有日志
-    if (
-      groupIdFilter !== null &&
-      groupIdFilter.length > 0 &&
-      !item.groupId.includes(groupIdFilter)
-    )
-      match = false;
-  } else if (mode === "CLIENT_ID") {
-    // 【修复】如果 clientIdFilter 为 null 或空，应该显示所有日志
-    if (
-      clientIdFilter !== null &&
-      clientIdFilter.length > 0 &&
-      !item.clientId.includes(clientIdFilter)
-    )
-      match = false;
-  } else if (mode === "USER_ID") {
-    // 【修复】如果 userIdFilter 为 null，应该显示所有日志
-    if (userIdFilter !== null && item.userId !== userIdFilter) match = false;
+export const isNil = (val: unknown) => {
+  return val == null
+}
+
+export const isUnEmptyString = (val: unknown) => {
+  return !isNil(val) && `${val}` !== ''
+}
+
+export const isLogVisible = (log: LogDataPacket, mode: FilterMode, filterOptions?: FilterOptions) => {
+  const { levelFilter, groupIdFilter, clientIdFilter, userIdFilter } = filterOptions || {}
+
+  if (mode === 'NONE') {
+    return true
   }
 
-  return match;
-};
+  let isMatched = true
 
-// === 3. 核心日志插入和历史游标逻辑 ===
+  if (mode === 'ALL') {
+    if (isUnEmptyString(levelFilter) && log.logLevel !== levelFilter) {
+      isMatched = false
+    }
 
+    if (isUnEmptyString(userIdFilter) && log.userId !== userIdFilter) {
+      isMatched = false
+    }
+
+    if (isUnEmptyString(groupIdFilter) && log.groupId !== groupIdFilter) {
+      isMatched = false
+    }
+
+    if (isUnEmptyString(clientIdFilter) && log.clientId !== clientIdFilter) {
+      isMatched = false
+    }
+  }
+  else if (mode === 'LEVEL') {
+    if (isUnEmptyString(levelFilter) && log.logLevel !== levelFilter) {
+      isMatched = false
+    }
+  }
+  else if (mode === 'GROUP_ID') {
+    if (isUnEmptyString(groupIdFilter) && log.groupId !== groupIdFilter) {
+      isMatched = false
+    }
+  }
+  else if (mode === 'CLIENT_ID') {
+    if (isUnEmptyString(clientIdFilter) && log.clientId !== clientIdFilter) {
+      isMatched = false
+    }
+  }
+
+  return isMatched
+}
+
+// log operations
 /**
  * 高效地将新日志插入到缓存中，采用局部排序和切片替换机制。
  * 【修复】确保合并后的日志有序且唯一（基于 ID 去重）。
@@ -159,10 +132,16 @@ export const shouldLogBeDisplayed = (
  * @param newLogs 经过去重且已排序的新日志数组
  */
 const insertLogsOrdered = (
-  cache: Ref<LogItem[]>,
+  cache: Ref<LogDataPacket[]>,
   idSet: Ref<Set<number>>,
-  newLogs: LogItem[]
+  newLogs: LogDataPacket[]
 ): void => {
+
+
+
+
+
+
   if (newLogs.length === 0) return;
 
   const cacheArray = cache.value;
@@ -170,10 +149,10 @@ const insertLogsOrdered = (
   const lastNewLog = newLogs[newLogs.length - 1];
 
   // 1. 找到起始插入点 startIdx: cacheArray 中第一个 >= firstNewLog 的日志的索引
-  const startIdx = findInsertionIndex(cacheArray, firstNewLog, logComparator);
+  const startIdx = findInsertionIndex(firstNewLog, cacheArray, logComparator);
 
   // 2. 找到结束插入点 endIdx: cacheArray 中第一个 > lastNewLog 的日志的索引
-  let endIdx = findInsertionIndex(cacheArray, lastNewLog, logComparator);
+  let endIdx = findInsertionIndex(lastNewLog, cacheArray, logComparator);
 
   //    需要向后延伸 endIdx，确保包含所有交错的旧日志
   while (
@@ -189,7 +168,7 @@ const insertLogsOrdered = (
 
   // 【修复】去重：基于 ID 去重，保留第一个出现的日志（按排序顺序）
   const seenIds = new Set<number>();
-  const uniqueMergedLogs: LogItem[] = [];
+  const uniqueMergedLogs: LogDataPacket[] = [];
   for (const log of mergedLogs) {
     if (!seenIds.has(log.id)) {
       seenIds.add(log.id);
@@ -217,14 +196,18 @@ const insertLogsOrdered = (
 
   // 【可选】验证最终结果（可通过导出函数手动调用完整验证）
   // 注意：这里只做基本检查，完整验证请使用导出的 validateLogsOrderedAndUnique 函数
-};
+}
+
+
+
+
 
 /**
  * 【新增】验证日志数组是否有序且唯一
  * @param logs 日志数组
  * @returns 如果有序且唯一返回 true，否则返回 false
  */
-const validateLogsOrderedAndUnique = (logs: LogItem[]): boolean => {
+const validateLogsOrderedAndUnique = (logs: LogDataPacket[]): boolean => {
   if (logs.length === 0) return true;
 
   const seenIds = new Set<number>();
@@ -260,7 +243,7 @@ const validateLogsOrderedAndUnique = (logs: LogItem[]): boolean => {
 /**
  * 辅助函数：获取最新日志的时间戳和序列号。
  */
-const getLatestLogTimeAndSequence = (logs: LogItem[]) => {
+const getLatestLogTimeAndSequence = (logs: LogDataPacket[]) => {
   if (logs.length === 0) {
     // 首次轮询或缓存为空，使用当前时间往前推 50s 作为起始时间
     return { timestamp: Date.now() - 50000, sequence: 0 };
@@ -275,7 +258,7 @@ const getLatestLogTimeAndSequence = (logs: LogItem[]) => {
 /**
  * 辅助函数：获取最旧日志的时间戳和序列号作为历史查询的上限。
  */
-const getOldestLogTimeAndSequence = (logs: LogItem[]) => {
+const getOldestLogTimeAndSequence = (logs: LogDataPacket[]) => {
   if (logs.length === 0) {
     // 缓存为空，使用当前时间作为最旧时间戳
     return { timestamp: Date.now(), sequence: 0 };
@@ -306,20 +289,34 @@ const getLogColor = (level: LogLevel) => {
   }
 };
 
-const formatLog = (item: Omit<LogItem, "formattedMsg">): string => {
+const formatLog = (item: Omit<LogDataPacket, "formattedMessage">): string => {
   const reset = "\x1b[0m";
   const dim = "\x1b[90m";
-  const color = getLogColor(item.level);
+  const color = getLogColor(item.logLevel);
 
-  // 格式化：时间戳 (ISO) + Sequence (4位)
+  // 【修复】格式化时间戳为本地时间，而不是 UTC 时间
+  // toISOString() 返回的是 UTC 时间，会导致时区偏差（例如 GMT+8 会少 8 小时）
+  // 使用本地时间格式化：YYYY-MM-DD HH:mm:ss.SSS
+  const formatLocalTime = (timestamp: number): string => {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const seconds = String(date.getSeconds()).padStart(2, "0");
+    const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
+  };
+
+  // 格式化：时间戳 (本地时间) + Sequence (4位)
   return [
-    `${dim}${new Date(item.timestamp).toISOString()}${reset}`,
+    `${dim}${formatLocalTime(item.timestamp)}${reset}`,
     `${dim}${item.sequence.toString().padStart(4, "0")}${reset}`,
-    `\x1b[36m${item.serviceName.padEnd(12)}${reset}`,
-    `\x1b[34m${(item.userId || "N/A").padEnd(8)}${reset}`,
-    `\x1b[35m${(item.groupId + "/" + item.clientId).padEnd(14)}${reset}`,
-    `${color}${item.level.padEnd(5)}${reset}`,
-    `${item.message}`,
+    `[\x1b[36m${item.serviceName.padEnd(12)}${reset}]`,
+    `\x1b[34m${item.userId.padEnd(8)}${reset}`,
+    `${color}${item.logLevel.padEnd(5)}${reset}`,
+    `${item.info}`,
   ].join("  ");
 };
 
@@ -327,39 +324,50 @@ const mockLogGeneration = (
   id: number,
   timestamp: number,
   isHistorical: boolean
-): LogItem => {
-  const level: LogLevel = ["INFO", "INFO", "INFO", "DEBUG", "WARN", "ERROR"][
+): LogDataPacket => {
+  const logLevel: LogLevel = ["INFO", "INFO", "INFO", "DEBUG", "WARN", "ERROR"][
     Math.floor(Math.random() * 6)
   ] as LogLevel;
   const serviceName =
     MOCK_SERVICES[Math.floor(Math.random() * MOCK_SERVICES.length)];
-  const userId = MOCK_USERS[Math.floor(Math.random() * MOCK_USERS.length)];
+  const userIdRaw = MOCK_USERS[Math.floor(Math.random() * MOCK_USERS.length)];
+  const userId = userIdRaw || "guest"; // LogDataPacket 的 userId 是 string，不是 null
   const groupId = MOCK_GROUPS[Math.floor(Math.random() * MOCK_GROUPS.length)];
   const clientId =
     MOCK_CLIENTS[Math.floor(Math.random() * MOCK_CLIENTS.length)];
-  const message = isHistorical
-    ? `[History #${id}] Log message for ${serviceName} at level ${level}.`
-    : `[LIVE #${id}] Processing request for ${userId || "guest"}.`;
+  const info = isHistorical
+    ? `[History #${id}] Log message for ${serviceName} at level ${logLevel}.`
+    : `[LIVE #${id}] Processing request for ${userId}.`;
 
   // 生成 Sequence (0-999)
   const sequence = Math.floor(Math.random() * 1000);
 
-  const baseItem: Omit<LogItem, "formattedMsg"> = {
+  const formattedMessage = formatLog({
     id,
     timestamp,
     sequence,
-    level,
+    logLevel,
     serviceName,
     userId,
     groupId,
     clientId,
-    message,
+    info,
+  });
+
+  const result: LogDataPacket = {
+    id,
+    timestamp,
+    sequence,
+    logLevel,
+    serviceName,
+    userId,
+    groupId,
+    clientId,
+    info,
+    formattedMessage,
   };
 
-  return {
-    ...baseItem,
-    formattedMsg: formatLog(baseItem),
-  };
+  return result;
 };
 
 // 用于初始化的模拟函数
@@ -367,8 +375,8 @@ const generateMockLogs = (
   count: number,
   startId: number,
   startTime: number
-): LogItem[] => {
-  const logs: LogItem[] = [];
+): LogDataPacket[] => {
+  const logs: LogDataPacket[] = [];
   let currentTimestamp = startTime;
   for (let i = 0; i < count; i++) {
     const id = startId + i;
@@ -385,8 +393,8 @@ const generateMockLogs = (
 const pullNewLogsMockAPI = (
   sinceTimestamp: number,
   limit: number
-): LogItem[] => {
-  const newLogs: LogItem[] = [];
+): LogDataPacket[] => {
+  const newLogs: LogDataPacket[] = [];
   const logCount = Math.min(
     limit,
     10 + Math.floor(Math.random() * (limit - 10))
@@ -425,8 +433,8 @@ const pullOlderLogsMockAPI = (
   startTime: number,
   endTime: number,
   limit: number
-): LogItem[] => {
-  const olderLogs: LogItem[] = [];
+): LogDataPacket[] => {
+  const olderLogs: LogDataPacket[] = [];
 
   const logCount = Math.min(
     limit,
@@ -459,16 +467,18 @@ const pullOlderLogsMockAPI = (
   return olderLogs.slice(0, limit);
 };
 
-// === 5. Pinia Store 定义 ===
-
 export const useLogStore = defineStore("logTerminal", () => {
+
+
+
+
   // === 状态 State ===
   const initialLogs = generateMockLogs(
     500,
     MAX_MOCK_HISTORY_SIZE,
     Date.now() - 500 * 100
   ).sort(logComparator);
-  const allLogs = ref<LogItem[]>(initialLogs);
+  const allLogs = ref<LogDataPacket[]>(initialLogs);
 
   // 【修改】用于跟踪历史加载的最旧时间戳
   const oldestLogTimestamp = ref(
@@ -547,13 +557,15 @@ export const useLogStore = defineStore("logTerminal", () => {
 
     // 有过滤条件时才进行过滤
     return allLogs.value.filter((item) =>
-      shouldLogBeDisplayed(
+      isLogVisible(
         item,
         filterMode.value,
-        levelFilter.value,
-        groupIdFilter.value,
-        clientIdFilter.value,
-        userIdFilter.value
+        {
+          levelFilter: levelFilter.value || undefined,
+          groupIdFilter: groupIdFilter.value || undefined,
+          clientIdFilter: clientIdFilter.value || undefined,
+          userIdFilter: userIdFilter.value || undefined,
+        }
       )
     );
   });
@@ -616,7 +628,7 @@ export const useLogStore = defineStore("logTerminal", () => {
   /**
    * 获取过滤后日志的切片，用于虚拟滚动。
    */
-  const getLogSlice = (start: number, size: number): LogItem[] => {
+  const getLogSlice = (start: number, size: number): LogDataPacket[] => {
     return filteredLogs.value.slice(start, start + size);
   };
 
@@ -754,10 +766,10 @@ export const useLogStore = defineStore("logTerminal", () => {
    * 溢出时从最旧日志端 (开头) 移除，并更新 oldestLogTimestamp。
    */
   const pullAndProcessLogs = async (): Promise<{
-    newLogs: LogItem[];
+    newLogs: LogDataPacket[];
     nextDelay: number;
   }> => {
-    let uniqueNewLogs: LogItem[] = [];
+    let uniqueNewLogs: LogDataPacket[] = [];
     let nextDelay = POLL_INTERVAL_BASE;
 
     try {
