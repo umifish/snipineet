@@ -3,23 +3,6 @@ import { ref, computed } from 'vue'
 import { FilterMode, LogDataPacket } from './type'
 import { generateMockLogs, pullNewLogsMockAPI, pullOlderLogsMockAPI } from './mock'
 
-// ==== 以下为常量导出，保持向后兼容 ====
-import {
-  POLL_INTERVAL_BASE,
-  MAX_RETRY_COUNT,
-  MAX_RETRY_DELAY,
-  RETRY_JITTER_RATIO,
-  POLLING_LIMIT,
-  HISTORY_LIMIT,
-  HISTORY_TIME_STEP,
-} from '../components/config'
-
-// 重新导出常量，保持向后兼容
-export { POLL_INTERVAL_BASE, MAX_RETRY_COUNT }
-// ====== 以上为常量导出，保持向后兼容 ======
-
-
-
 // constants
 export const MAX_CACHE_SIZE = 10000; // 最大缓存日志数量
 
@@ -29,6 +12,27 @@ export const SENTINEL_QUERY_LIMIT = 200 // 哨兵每次查询的日志数量限�
 export const SENTINEL_TIME_WINDOW = 3600000 // 哨兵检查的时间窗口（毫秒），只检查最近时间窗口内的延迟日志
 export const SENTINEL_COOLDOWN_INTERVAL = 6 // 哨兵冷却间隔：完成一轮检查后，等待 N 次主轮询再重新启动
 export const SENTINEL_TIME_STEP = 300000 // 哨兵每次查询的时间步长（毫秒），每次往前检查的时间范围
+
+/** 基础轮询间隔（毫秒） */
+export const POLL_INTERVAL_BASE = 2000; // 2s
+
+/** 最大重试次数，超过后停止轮询 */
+export const MAX_RETRY_COUNT = 5;
+
+/** 最大重试延迟（毫秒） */
+export const MAX_RETRY_DELAY = 60000; // 60s
+
+/** 随机抖动比例 */
+export const RETRY_JITTER_RATIO = 0.1; // 10%
+
+/** 轮询每次获取的日志数量限制 */
+export const POLLING_LIMIT = 100;
+
+/** 历史查询每次获取的日志数量限制 */
+export const HISTORY_LIMIT = 100;
+
+/** 历史查询的时间步长（毫秒） */
+export const HISTORY_TIME_STEP = 3600000; // 1小时
 
 // insertion & sorting
 export type Comparator<T> = (a: T, b: T) => number
@@ -100,10 +104,11 @@ export function insertLogsOrdered<T extends { id: string | number }>(
   newLogs: T[],
   options?: InsertLogsOptions<T>
 ): void {
-  const { comparator, onDuplicateId = defaultOnDuplicateId } = options || {}
+  const { comparator = logComparator, onDuplicateId = defaultOnDuplicateId } = options || {}
   
   // 如果没有提供 comparator，且类型是 LogDataPacket，使用默认的 logComparator
-  let actualComparator: (a: T, b: T) => number
+  let actualComparator: Comparator<T>
+
   if (!comparator) {
     // 检查是否是 LogDataPacket 类型
     if (targetLogs.length > 0 && 'timestamp' in targetLogs[0] && 'sequence' in targetLogs[0]) {
