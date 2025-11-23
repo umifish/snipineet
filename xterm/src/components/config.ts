@@ -1,3 +1,11 @@
+
+
+// export const SENTINEL_POLL_INTERVAL = 3 // 哨兵轮询间隔：每 N 次主轮询执行一次哨兵轮询
+// export const SENTINEL_QUERY_LIMIT = 200 // 哨兵每次查询的日志数量限制
+// export const SENTINEL_TIME_WINDOW = 3600000 // 哨兵检查的时间窗口（毫秒），只检查最近时间窗口内的延迟日志
+// export const SENTINEL_COOLDOWN_INTERVAL = 6 // 哨兵冷却间隔：完成一轮检查后，等待 N 次主轮询再重新启动
+// export const SENTINEL_TIME_STEP = 300000 // 哨兵每次查询的时间步长（毫秒），每次往前检查的时间范围
+
 // ========== 缓存配置 ==========
 /** 最大缓存日志数量 */
 export const MAX_CACHE_SIZE = 10000;
@@ -18,12 +26,6 @@ export const RETRY_JITTER_RATIO = 0.1; // 10%
 /** 轮询每次获取的日志数量限制 */
 export const POLLING_LIMIT = 100;
 
-// ========== 历史加载配置 ==========
-/** 历史查询每次获取的日志数量限制 */
-export const HISTORY_LIMIT = 100;
-
-/** 历史查询的时间步长（毫秒） */
-export const HISTORY_TIME_STEP = 3600000; // 1小时
 
 // ========== 哨兵机制配置 ==========
 /** 哨兵轮询间隔：每 N 次主轮询执行一次哨兵轮询 */

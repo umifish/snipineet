@@ -1,4 +1,4 @@
-import type { LogLevel, LogDataPacket } from './type'
+import type { LogLevel, LogDataPacket } from '../core/type'
 
 /** 模拟的总历史日志条数 */
 export const MAX_MOCK_HISTORY_SIZE = 50000;
