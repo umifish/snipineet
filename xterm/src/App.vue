@@ -1,12 +1,14 @@
 <template>
   <main class="app-shell">
-    <h1>日志终端</h1>
-    <LogTerminal />
+    <!-- <h1>日志终端</h1> -->
+    <!-- <LogTerminal /> -->
+    <DemoTerminal />
   </main>
 </template>
 
 <script setup lang="ts">
 import LogTerminal from "@/components/terminal.vue";
+import DemoTerminal from "@/components/demo.vue";
 </script>
 
 <style scoped>

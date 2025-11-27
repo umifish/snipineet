@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Xterm.js Scrollback Buffer 行删除 (v5.5.0)</title>
+    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.5.0/css/xterm.css" />
+    
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #terminal-container {
+            width: 80%;
+            max-width: 800px;
+            height: 400px;
+            margin-top: 20px;
+        }
+        .xterm {
+            padding: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            margin-top: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Xterm.js Scrollback Buffer 行删除演示</h1>
+    <p>当前使用 xterm.js v5.5.0。此操作通过直接修改内部 Buffer API 实现。</p>
+
+    <div id="terminal-container"></div>
+    
+    <button id="delete-button">点击删除 'Scrollback Line 5'</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.5.0/lib/xterm.js"></script>
+
+    <script>
+        // 确保 Terminal 变量可用
+        const { Terminal } = window;
+        const terminalContainer = document.getElementById('terminal-container');
+        const deleteButton = document.getElementById('delete-button');
+
+        // 3. 初始化终端
+        const term = new Terminal({
+            cols: 80,
+            rows: 15,
+            scrollback: 100 // 确保有足够的回滚行
+        });
+
+        term.open(terminalContainer);
+
+        /**
+         * @function deleteLineFromScrollback
+         * @description 从整个缓冲区 (包括回滚区) 删除指定绝对索引的行。
+         * @param {number} absoluteIndex - 要删除的行的绝对索引 (从缓冲区顶部开始, 0-based)。
+         */
+        function deleteLineFromScrollback(absoluteIndex) {
+            const activeBuffer = term.buffer.active;
+            const lines = activeBuffer.lines;
+
+            console.log(`尝试删除绝对索引: ${absoluteIndex} 的行...`);
+
+            if (absoluteIndex < 0 || absoluteIndex >= lines.length) {
+                term.write(`\r\n\x1b[31m错误: 无效的行索引 ${absoluteIndex}\x1b[0m\r\n$ `);
+                return;
+            }
+
+            // --- 核心操作: 删除行 ---
+            lines.splice(absoluteIndex, 1);
+            // ------------------------
+
+            // 1. 调整 baseY (回滚区底部索引)
+            // 如果删除的行在当前可见区域之上 (即在回滚区)，active.baseY 需要减 1。
+            if (absoluteIndex < activeBuffer.baseY) {
+                activeBuffer.baseY--;
+            } 
+            
+            // 2. 调整 cursorY (相对于 baseY 的光标偏移量)
+            const cursorAbsoluteIndex = activeBuffer.baseY + activeBuffer.cursorY;
+            
+            if (absoluteIndex < cursorAbsoluteIndex) {
+                // 如果删除的是光标上方的行 (但不包括光标所在的行，因为它已经被删除并处理了)
+                activeBuffer.cursorY--;
+                
+                // 确保 cursorY 不会变成负数 (防止意外的向上拉伸)
+                if (activeBuffer.cursorY < 0) {
+                    activeBuffer.cursorY = 0;
+                    activeBuffer.baseY = Math.max(0, activeBuffer.baseY - 1); // 保证 baseY 不为负
+                }
+            }
+
+            // 3. 强制终端重绘，因为底层数据变化不会自动触发渲染。
+            term.refresh(0, term.rows - 1);
+            term.write(`\r\n\x1b[32m成功删除行 ${absoluteIndex}。请滚动查看。\x1b[0m\r\n$ `);
+        }
+
+        // --- 演示逻辑 ---
+
+        // 写入 10 行内容进入 Scrollback Buffer (可见行只有 15 行，前 10 行会被推到回滚区)
+        // 假设 terminal.rows = 15
+        for (let i = 1; i <= 10; i++) {
+            term.writeln(`Scrollback Line ${i} (Index ${i - 1})`);
+        }
+        
+        // 写入 5 行内容，这 5 行在可见区域
+        for (let i = 1; i <= 5; i++) {
+            term.writeln(`Visible Line ${i}`);
+        }
+
+        // 写入最后的 Prompt
+        term.write('$ ');
+        
+        // 目标：删除 'Scrollback Line 5'
+        // 它的绝对索引是 4 (因为它是第 5 行，0-based)
+        const targetAbsoluteIndex = 4;
+
+        deleteButton.addEventListener('click', () => {
+            deleteLineFromScrollback(targetAbsoluteIndex);
+        });
+
+        // 初始提示
+        term.write('\r\n\x1b[33m请向下滚动查看 Scrollback Buffer 中的 Line 1-10.\x1b[0m\r\n$ ');
+    </script>
+
+</body>
+</html>
