@@ -5,32 +5,43 @@
       ref="tabsRef"
       class="full-width-tabs"
       @tab-click="handleTabClick"
-      v-bind="$attrs" 
+      v-bind="$attrs"
     >
-      <slot>
-        <el-tab-pane
-          v-for="item in tabList"
-          :key="item.name"
-          :label="item.label"
-          :name="item.name"
-        >
-          <slot :name="item.name">{{ item.content }}</slot>
-        </el-tab-pane>
-      </slot>
+      <el-tab-pane
+        v-for="item in tabList"
+        :key="item.name"
+        :label="item.label"
+        :name="item.name"
+      >
+        <div class="pane-content-wrapper">
+          <slot :name="item.name" :tab="item">
+            {{ item.content }}
+          </slot>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <div v-if="navState.hasOverflow" class="custom-more-action">
-      <el-dropdown trigger="click" :disabled="navState.isRightDisabled" @command="handleMoreCommand">
-        <div class="more-btn-icon" :class="{ 'is-disabled': navState.isRightDisabled }">
+      <el-dropdown 
+        trigger="click" 
+        :disabled="navState.isRightDisabled" 
+        @command="handleMoreCommand"
+      >
+        <div 
+          class="more-btn-trigger" 
+          :class="{ 'is-disabled': navState.isRightDisabled }"
+          title="更多页签"
+        >
           <el-icon><MoreFilled /></el-icon>
         </div>
+        
         <template #dropdown>
-          <el-dropdown-menu class="smart-overflow-dropdown">
+          <el-dropdown-menu class="smart-tabs-dropdown">
             <el-dropdown-item 
               v-for="item in overflowTabs" 
               :key="item.name" 
               :command="item.name"
-              :class="{ 'is-active': activeName === item.name }"
+              :class="{ 'is-active-tab': activeName === item.name }"
             >
               {{ item.label }}
             </el-dropdown-item>
@@ -45,20 +56,37 @@
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
 import { MoreFilled } from '@element-plus/icons-vue';
 
+// 定义属性
 const props = defineProps({
-  tabList: { type: Array, default: () => [] },
-  modelValue: { type: String, default: '' }
+  // 数据源
+  tabList: {
+    type: Array,
+    default: () => []
+  },
+  // 双向绑定支持
+  modelValue: {
+    type: String,
+    default: ''
+  }
 });
 
 const emit = defineEmits(['update:modelValue']);
+
+// 响应式状态
 const activeName = ref(props.modelValue || props.tabList[0]?.name);
 const tabsRef = ref(null);
 const containerRef = ref(null);
+const navState = reactive({
+  hasOverflow: false,      // 是否溢出
+  isRightDisabled: false   // 右侧是否滚动到底
+});
+const overflowTabs = ref([]); // 被遮挡的页签列表
 
-const navState = reactive({ hasOverflow: false, isRightDisabled: false });
-const overflowTabs = ref([]);
-
-const updateNavLogic = () => {
+/**
+ * 核心逻辑：计算导航栏状态
+ * 检查溢出、同步禁用状态、筛选隐藏项
+ */
+const updateNavStatus = () => {
   const el = tabsRef.value?.$el;
   if (!el) return;
 
@@ -66,97 +94,110 @@ const updateNavLogic = () => {
   const navList = el.querySelector('.el-tabs__nav');
   const nextBtn = el.querySelector('.el-tabs__nav-next');
 
-  // 风险点1处理：如果容器隐藏，宽度为0，不进行逻辑计算
+  // 1. 如果容器当前不可见（如在隐藏的弹窗中），跳过计算
   if (!navScroll || navScroll.offsetWidth === 0) return;
 
-  navState.hasOverflow = navList.offsetWidth > navScroll.offsetWidth;
+  // 2. 判断是否溢出（增加 1px 缓冲区处理浏览器缩放偏差）
+  navState.hasOverflow = navList.offsetWidth > navScroll.offsetWidth + 1;
+
+  // 3. 同步原生右侧箭头的禁用状态
   navState.isRightDisabled = nextBtn?.classList.contains('is-disabled');
 
+  // 4. 计算哪些页签超出了可视区域
   const scrollRect = navScroll.getBoundingClientRect();
   const tabItems = navList.querySelectorAll('.el-tabs__item');
-  const hidden = [];
+  const hiddenItems = [];
   
-  tabItems.forEach((item, index) => {
-    const rect = item.getBoundingClientRect();
-    // 增加 2px 容错，判断是否在可见区域内
-    if (rect.right > scrollRect.right + 2 || rect.left < scrollRect.left - 2) {
-      // 兼容 slot 模式和数组模式
-      const tabData = props.tabList[index] || { 
-        label: item.innerText.trim(), 
-        name: item.id.replace('tab-', '') 
-      };
-      hidden.push(tabData);
+  tabItems.forEach((tabEl, index) => {
+    const rect = tabEl.getBoundingClientRect();
+    // 允许 1.5px 的亚像素误差
+    const isOut = rect.right > scrollRect.right + 1.5 || rect.left < scrollRect.left - 1.5;
+    if (isOut && props.tabList[index]) {
+      hiddenItems.push(props.tabList[index]);
     }
   });
-  overflowTabs.value = hidden;
+  overflowTabs.value = hiddenItems;
 };
 
-// 各种交互触发更新
-const handleTabClick = () => setTimeout(updateNavLogic, 300);
+/**
+ * 下拉菜单点击处理
+ */
 const handleMoreCommand = (name) => {
   activeName.value = name;
+  emit('update:modelValue', name);
+
   nextTick(() => {
-    tabsRef.value?.scrollToActiveTab?.();
-    setTimeout(updateNavLogic, 350);
+    // 调用 Element 原生方法：滚动到激活的 Tab 所在位置
+    if (tabsRef.value?.scrollToActiveTab) {
+      tabsRef.value.scrollToActiveTab();
+    }
+    // 等待滚动动画完成后刷新状态
+    setTimeout(updateNavStatus, 350);
   });
 };
 
-let resizeObs = null;
-let mutationObs = null;
+const handleTabClick = () => setTimeout(updateNavStatus, 300);
+
+// --- 观察者逻辑 ---
+
+let resizeObserver = null;
+let mutationObserver = null;
 
 onMounted(() => {
   nextTick(() => {
-    updateNavLogic();
-    resizeObs = new ResizeObserver(() => {
-      // 使用 requestAnimationFrame 优化 Resize 性能
-      window.requestAnimationFrame(updateNavLogic);
+    updateNavStatus();
+    
+    // 监听容器尺寸变化（响应式）
+    resizeObserver = new ResizeObserver(() => {
+      window.requestAnimationFrame(updateNavStatus);
     });
-    if (containerRef.value) resizeObs.observe(containerRef.value);
+    if (containerRef.value) resizeObserver.observe(containerRef.value);
 
+    // 监听 DOM 类名变化（用于实时同步原生的 is-disabled 状态）
     const header = tabsRef.value?.$el?.querySelector('.el-tabs__header');
     if (header) {
-      mutationObs = new MutationObserver(updateNavLogic);
-      mutationObs.observe(header, { attributes: true, subtree: true, attributeFilter: ['class'] });
+      mutationObserver = new MutationObserver(updateNavStatus);
+      mutationObserver.observe(header, { 
+        attributes: true, 
+        subtree: true, 
+        attributeFilter: ['class'] 
+      });
     }
   });
 });
 
 onBeforeUnmount(() => {
-  resizeObs?.disconnect();
-  mutationObs?.disconnect();
+  if (resizeObserver) resizeObserver.disconnect();
+  if (mutationObserver) mutationObserver.disconnect();
 });
 
-// 监听 V-Model
-watch(() => props.modelValue, (v) => {
-  if (v !== activeName.value) {
-    activeName.value = v;
-    nextTick(() => tabsRef.value?.scrollToActiveTab?.());
+// 同步外部 v-model 变化
+watch(() => props.modelValue, (val) => {
+  if (val !== activeName.value) {
+    activeName.value = val;
+    nextTick(() => {
+      tabsRef.value?.scrollToActiveTab?.();
+      setTimeout(updateNavStatus, 350);
+    });
   }
-});
-watch(activeName, (v) => emit('update:modelValue', v));
-
-// 风险点2处理：监听 Tab 列表变化
-watch(() => props.tabList.length, () => {
-  nextTick(() => {
-    updateNavLogic();
-    setTimeout(updateNavLogic, 400); // 补偿动画时间
-  });
 });
 </script>
 
 <style scoped>
+/* 根容器设置 */
 .smart-tabs-wrapper {
   position: relative;
   width: 100%;
   box-sizing: border-box;
+  background-color: #fff;
 }
 
-/* 核心：为导航栏右侧预留 40px，但不影响 content */
+/* 核心：只让导航头缩短，不影响内容区 */
 :deep(.el-tabs__nav-wrap) {
-  padding-right: 40px;
+  padding-right: 40px !important; /* 给“更多”按钮预留 40px 空间 */
 }
 
-/* 核心：偏移原生的下一页按钮 */
+/* 核心：偏移原生的“下一页”箭头，防止与“更多”按钮重叠 */
 :deep(.el-tabs__nav-next) {
   right: 40px !important; 
   display: flex;
@@ -165,18 +206,21 @@ watch(() => props.tabList.length, () => {
   width: 25px;
 }
 
-/* 更多按钮绝对定位 */
-.custom-more-action {
+/* 自定义“更多”按钮 */
+.abs-more-action {
   position: absolute;
   right: 0;
   top: 0;
   width: 40px;
-  height: 40px; 
-  z-index: 20;
-  background: #fff;
+  height: 40px; /* 匹配 el-tabs__header 默认高度 */
+  z-index: 10;
+  background-color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.more-btn-icon {
+.more-btn-trigger {
   width: 100%;
   height: 100%;
   display: flex;
@@ -185,27 +229,35 @@ watch(() => props.tabList.length, () => {
   cursor: pointer;
   color: #909399;
   border-left: 1px solid #f0f2f5;
-  border-bottom: 2px solid #e4e7ed; /* 这里的颜色要和 el-tabs 的边框色一致 */
+  border-bottom: 2px solid #e4e7ed; /* 模拟 tabs 底部装饰线 */
+  transition: all 0.2s ease;
 }
 
-.more-btn-icon:hover:not(.is-disabled) {
+.more-btn-trigger:hover:not(.is-disabled) {
   color: #409eff;
   background-color: #f5f7fa;
 }
 
-.more-btn-icon.is-disabled {
+.more-btn-trigger.is-disabled {
   color: #dcdfe6 !important;
   cursor: not-allowed;
 }
 
-/* 下拉菜单高亮样式 */
-:deep(.smart-overflow-dropdown .is-active) {
+/* 下拉菜单高亮激活项 */
+:deep(.smart-tabs-dropdown .is-active-tab) {
   color: #409eff !important;
   font-weight: bold;
-  background-color: #f5f7fa;
+  background-color: #ecf5ff;
 }
 
+/* 强制内容区充满 100% */
 :deep(.el-tabs__content) {
   width: 100%;
+  padding: 16px 0; /* 可根据需要调整 */
+}
+
+.pane-content-wrapper {
+  width: 100%;
+  box-sizing: border-box;
 }
 </style>
